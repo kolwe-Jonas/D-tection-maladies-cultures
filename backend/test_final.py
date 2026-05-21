@@ -27,7 +27,7 @@ print("="*80 + "\n")
 try:
     with open(temp_image_path, 'rb') as f:
         files = {'image': f}
-        resp = requests.post('http://127.0.0.1:5000/detect', files=files, timeout=10)
+        resp = requests.post('http://127.0.0.1:5000/detect', files=files, timeout=30)
     
     print(f"\n{'='*80}")
     print("✅ RÉPONSE REÇUE")

@@ -16,87 +16,164 @@ const newAnalysisBtn = document.getElementById('newAnalysisBtn');
 const plantTypeSelect = document.getElementById('plantTypeSelect');
 const uploadZone = document.getElementById('uploadZone');
 
-// Caméra vs Fichier selection trigger
-if (cameraBtn) {
-    cameraBtn.addEventListener('click', () => {
-        imageInput.setAttribute('capture', 'environment');
-        imageInput.click();
-    });
+// Event Handlers helper for buttons to prevent default actions
+function bindClick(btn, handler) {
+    if (btn) {
+        btn.addEventListener('click', (event) => {
+            event.preventDefault();
+            handler(event);
+        });
+    }
 }
 
-if (chooseImageBtn) {
-    chooseImageBtn.addEventListener('click', () => {
-        imageInput.removeAttribute('capture');
-        imageInput.click();
-    });
-}
-
-if (uploadZone) {
-    uploadZone.addEventListener('click', () => {
-        imageInput.removeAttribute('capture');
-        imageInput.click();
-    });
-}
-
-imageInput.addEventListener('change', (event) => {
-    handleImageSelect(event);
+// Caméra vs Fichier selection triggers
+bindClick(cameraBtn, () => {
+    imageInput.setAttribute('capture', 'environment');
+    imageInput.click();
 });
 
-analyzeBtn.addEventListener('click', analyzeImage);
-newAnalysisBtn.addEventListener('click', resetAnalysis);
+bindClick(chooseImageBtn, () => {
+    imageInput.removeAttribute('capture');
+    imageInput.click();
+});
 
-function handleImageSelect(event) {
-    const file = event.target.files[0];
+bindClick(uploadZone, () => {
+    imageInput.removeAttribute('capture');
+    imageInput.click();
+});
+
+// Drag and drop event listeners on uploadZone
+if (uploadZone) {
+    ['dragenter', 'dragover'].forEach(eventName => {
+        uploadZone.addEventListener(eventName, (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            uploadZone.classList.add('dragover');
+        }, false);
+    });
+
+    ['dragleave', 'drop'].forEach(eventName => {
+        uploadZone.addEventListener(eventName, (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            uploadZone.classList.remove('dragover');
+        }, false);
+    });
+
+    uploadZone.addEventListener('drop', (e) => {
+        const dt = e.dataTransfer;
+        const files = dt.files;
+        if (files && files.length > 0) {
+            // Assign the files to file input
+            try {
+                imageInput.files = files;
+            } catch (err) {
+                console.warn('Assignment to file input files failed: ', err);
+            }
+            handleImageSelect(files[0]);
+        }
+    }, false);
+}
+
+// Bind change handler on file input
+imageInput.addEventListener('change', (event) => {
+    if (event.target.files && event.target.files.length > 0) {
+        handleImageSelect(event.target.files[0]);
+    }
+});
+
+bindClick(analyzeBtn, analyzeImage);
+bindClick(newAnalysisBtn, resetAnalysis);
+
+// Process and display selected image preview
+function handleImageSelect(file) {
     if (!file) {
         return;
     }
 
+    // Validate that file is indeed an image
     if (!file.type.startsWith('image/')) {
         showError('Veuillez sélectionner une image valide.');
+        // Reset preview if invalid file selected
+        resetImagePreview();
         return;
     }
 
-    const maxSize = 10 * 1024 * 1024;
+    const maxSize = 10 * 1024 * 1024; // 10MB
     if (file.size > maxSize) {
         showError('L’image doit rester inférieure à 10 Mo.');
+        resetImagePreview();
         return;
     }
 
     hideError();
     hideResults();
 
-    // Afficher l'aperçu de l'image
+    // Use FileReader to display preview
     const reader = new FileReader();
     reader.onload = function(e) {
         const imagePreview = document.getElementById('imagePreview');
         const uploadPlaceholder = document.getElementById('uploadPlaceholder');
         if (imagePreview && uploadPlaceholder) {
+            // Smoothly swap classes for transition
             imagePreview.src = e.target.result;
             imagePreview.classList.remove('hidden');
             uploadPlaceholder.classList.add('hidden');
         }
     };
+    reader.onerror = function() {
+        showError('Impossible de lire le fichier image.');
+        resetImagePreview();
+    };
     reader.readAsDataURL(file);
 
-    fileLabel.textContent = `Image sélectionnée : ${file.name}`;
-    fileLabel.classList.remove('hidden');
-    analyzeBtn.disabled = false;
-    analyzeBtn.classList.add('active');
+    if (fileLabel) {
+        fileLabel.textContent = `Image sélectionnée : ${file.name}`;
+        fileLabel.classList.remove('hidden');
+    }
+
+    // Enable the analyze button and activate glowing pulse animation
+    if (analyzeBtn) {
+        analyzeBtn.disabled = false;
+        analyzeBtn.classList.add('active');
+    }
+}
+
+// Helper to reset preview area to default empty card
+function resetImagePreview() {
+    const imagePreview = document.getElementById('imagePreview');
+    const uploadPlaceholder = document.getElementById('uploadPlaceholder');
+    if (imagePreview && uploadPlaceholder) {
+        imagePreview.src = '';
+        imagePreview.classList.add('hidden');
+        uploadPlaceholder.classList.remove('hidden');
+    }
+    if (fileLabel) {
+        fileLabel.textContent = '';
+        fileLabel.classList.add('hidden');
+    }
+    if (analyzeBtn) {
+        analyzeBtn.disabled = true;
+        analyzeBtn.classList.remove('active');
+    }
 }
 
 async function analyzeImage() {
-    if (!imageInput.files.length) {
+    const file = imageInput.files[0];
+    if (!file) {
         showError('Veuillez choisir une image avant d’analyser.');
         return;
     }
 
-    analyzeBtn.disabled = true;
-    analyzeBtn.classList.remove('active');
+    if (analyzeBtn) {
+        analyzeBtn.disabled = true;
+        analyzeBtn.classList.remove('active');
+    }
     showError('');
     showLoading(true);
 
     const formData = new FormData();
-    formData.append('image', imageInput.files[0]);
+    formData.append('image', file);
     if (plantTypeSelect) {
         formData.append('plant_type', plantTypeSelect.value);
     }
@@ -119,8 +196,12 @@ async function analyzeImage() {
         showError(`Analyse échouée : ${error.message}`);
     } finally {
         showLoading(false);
-        analyzeBtn.disabled = false;
-        analyzeBtn.classList.add('active');
+        if (imageInput.files.length > 0) {
+            if (analyzeBtn) {
+                analyzeBtn.disabled = false;
+                analyzeBtn.classList.add('active');
+            }
+        }
     }
 }
 
@@ -128,10 +209,12 @@ function displayResults(data) {
     const detection = data.detection || {};
 
     // Afficher nom de la maladie et nom scientifique si disponible
-    if (detection.scientific_name) {
-        resultName.innerHTML = `${detection.disease_name || 'Maladie détectée'} <span class="scientific-name">(${detection.scientific_name})</span>`;
-    } else {
-        resultName.textContent = detection.disease_name || 'Maladie détectée';
+    if (resultName) {
+        if (detection.scientific_name) {
+            resultName.innerHTML = `${detection.disease_name || 'Maladie détectée'} <span class="scientific-name">(${detection.scientific_name})</span>`;
+        } else {
+            resultName.textContent = detection.disease_name || 'Maladie détectée';
+        }
     }
 
     // Gestion intelligente du score de confiance
@@ -145,7 +228,9 @@ function displayResults(data) {
     }
     pct = Math.round(pct);
     
-    resultConfidence.textContent = `${pct}%`;
+    if (resultConfidence) {
+        resultConfidence.textContent = `${pct}%`;
+    }
     const confidenceBar = document.getElementById('confidenceBar');
     if (confidenceBar) {
         confidenceBar.style.width = `${pct}%`;
@@ -159,38 +244,34 @@ function displayResults(data) {
     }
 
     // Afficher descriptions/symptômes, causes et traitements
-    resultDescription.textContent = detection.symptoms || detection.description || 'Symptômes non disponibles.';
-    resultCauses.textContent = detection.causes || 'Informations non disponibles.';
+    if (resultDescription) {
+        resultDescription.textContent = detection.symptoms || detection.description || 'Symptômes non disponibles.';
+    }
+    if (resultCauses) {
+        resultCauses.textContent = detection.causes || 'Informations non disponibles.';
+    }
     
-    let treatmentText = '';
-    if (detection.treatment) {
-        treatmentText += `Traitement : ${detection.treatment}`;
+    if (resultTreatment) {
+        let treatmentText = '';
+        if (detection.treatment) {
+            treatmentText += `Traitement : ${detection.treatment}`;
+        }
+        if (detection.prevention) {
+            if (treatmentText) treatmentText += '\n\n';
+            treatmentText += `Prévention : ${detection.prevention}`;
+        }
+        resultTreatment.textContent = treatmentText || 'Aucun traitement ou mesure de prévention spécifié.';
     }
-    if (detection.prevention) {
-        if (treatmentText) treatmentText += '\n\n';
-        treatmentText += `Prévention : ${detection.prevention}`;
-    }
-    resultTreatment.textContent = treatmentText || 'Aucun traitement ou mesure de prévention spécifié.';
 
-    resultCard.classList.remove('hidden');
-    resultCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    if (resultCard) {
+        resultCard.classList.remove('hidden');
+        resultCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
 }
 
 function resetAnalysis() {
     imageInput.value = '';
-    fileLabel.textContent = '';
-    fileLabel.classList.add('hidden');
-    
-    const imagePreview = document.getElementById('imagePreview');
-    const uploadPlaceholder = document.getElementById('uploadPlaceholder');
-    if (imagePreview && uploadPlaceholder) {
-        imagePreview.src = '';
-        imagePreview.classList.add('hidden');
-        uploadPlaceholder.classList.remove('hidden');
-    }
-
-    analyzeBtn.disabled = true;
-    analyzeBtn.classList.remove('active');
+    resetImagePreview();
     hideResults();
     showError('');
 }
@@ -234,4 +315,4 @@ if (analyzeBtn) {
     analyzeBtn.disabled = true;
     analyzeBtn.classList.remove('active');
 }
-console.log('✅ UI app initialized');
+console.log('✅ UI application events loaded');

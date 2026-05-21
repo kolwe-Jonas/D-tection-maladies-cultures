@@ -8,7 +8,7 @@ import base64
 import os
 import json
 
-BASE_URL = "http://10.18.10.59:5000"
+BASE_URL = "http://127.0.0.1:5000"
 
 def test_api_health():
     """Test if Flask API is running."""
@@ -30,14 +30,15 @@ def test_detection_with_dummy_image():
         "080a0c0b0c0c000d0c080d0d000101111401101702201212000101010101ffffff"
         "c00009010101011100ffc4001f0000010501010101010100000000000000000102030405"
         "0607080910ffc4b510000201020304050601070809000a181915131210110208" 
-        "14121104133130f01122232415f10132526374166171819" 
+        "14121104133130f01122232415f101325263741661718190" 
         "2426354556373839" "3a4344455463656766" "67686869" "8a8b8c"
         "95969798999a" "a4a5a6a7a8a9aab3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4"
         "d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf2f3f4f5f6f7f8f9faffd9"
     )
     
     try:
-        jpeg_bytes = bytes.fromhex(jpeg_hex)
+        clean_hex = "".join(jpeg_hex.split())
+        jpeg_bytes = bytes.fromhex(clean_hex)
         image_b64 = base64.b64encode(jpeg_bytes).decode('utf-8')
         
         payload = {
