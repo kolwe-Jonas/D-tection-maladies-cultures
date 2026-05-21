@@ -213,25 +213,8 @@ def _get_local_ip() -> str:
 
 
 if __name__ == "__main__":
-    local_ip = _get_local_ip()
-    logger.info("=" * 60)
-    logger.info("SERVEUR FLASK EN DEMARRAGE")
-    logger.info("=" * 60)
-    logger.info("Ecoute: 0.0.0.0:5000 (HTTP uniquement — pas HTTPS)")
-    logger.info("PC (test):     http://127.0.0.1:5000")
-    logger.info("Reseau (tel.): http://%s:5000", local_ip)
-    logger.info("Test sante:    http://%s:5000/health", local_ip)
-    logger.info("IMPORTANT: ne pas utiliser https:// sur le port 5000")
-    logger.info("=" * 60)
-    logger.info("SERVER RUNNING")
-    logger.info("=" * 60)
-
-    try:
-        app.run(
-            host="0.0.0.0",
-            port=5000,
-            debug=True,
-            use_reloader=True
-        )
-    except Exception as e:
-        logger.error(f"Erreur au demarrage du serveur: {str(e)}", exc_info=True)
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        debug=True
+    )
