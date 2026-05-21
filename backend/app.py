@@ -186,12 +186,83 @@ def detect():
                 "details": str(e)
             }), 500
 
-        logger.info(f"   ✅ Analyse complète - Réponse envoyée")
-        
+        logger.info("   ✅ Analyse complète - Préparation de la réponse JSON")
+
+        # === Normaliser et garantir les champs de sortie demandés ===
+        def _norm_text(v, default):
+            if v is None:
+                return default
+            if isinstance(v, str):
+                s = v.strip()
+                if s == "" or s.lower() in ("unknown", "unknown disease", "incertain", "inconnue"):
+                    return default
+                return s
+            # lists or other -> stringify safely
+            if isinstance(v, (list, tuple)):
+                if not v:
+                    return default
+                return ", ".join(str(x) for x in v)
+            return str(v)
+
+        # Defaults cohérents
+        DEFAULTS = {
+            "disease_name": "Maladie non identifiée",
+            "symptoms": "Symptômes non disponibles.",
+            "causes": "Causes non disponibles.",
+            "treatment": "Traitement non spécifié.",
+            "prevention": "Prévention non spécifiée.",
+        }
+
+        detection = match or {}
+
+        # confidence normalization: prefer confidence_score (percent), else confidence (0-1)
+        raw_conf = detection.get("confidence_score") or detection.get("confidence") or detection.get("confidence_pct")
+        try:
+            # If value between 0 and 1, convert to percent
+            conf = float(raw_conf)
+            if conf <= 1.0:
+                conf = conf * 100.0
+            confidence = round(max(0.0, min(100.0, conf)), 2)
+        except Exception:
+            confidence = 0.0
+
+        # Ensure disease_name comes from DB and is not a placeholder
+        disease_name = _norm_text(detection.get("disease_name") or detection.get("scientific_name"), DEFAULTS["disease_name"])
+
+        # If somehow disease_name is still the generic default, try to salvage from analysis (plant_type hint)
+        if disease_name == DEFAULTS["disease_name"]:
+            alt = analysis.get("plant_type") or analysis.get("probable_plant")
+            if alt:
+                disease_name = f"Possible: {alt} (à confirmer)"
+
+        # Textual fields
+        symptoms = _norm_text(detection.get("symptoms"), DEFAULTS["symptoms"])
+        causes = _norm_text(detection.get("causes"), DEFAULTS["causes"])
+        treatment = _norm_text(detection.get("treatment"), DEFAULTS["treatment"])
+        prevention = _norm_text(detection.get("prevention"), DEFAULTS["prevention"])
+
+        # If confidence very low (<50 after normalization) prefer to still return top DB match
+        # (find_best_match already returns a DB entry; keep match but flag low confidence)
+        low_confidence = confidence < 50.0
+
+        response_detection = {
+            "disease_name": disease_name,
+            "confidence": confidence,
+            "symptoms": symptoms,
+            "causes": causes,
+            "treatment": treatment,
+            "prevention": prevention,
+            # keep original detailed info for debugging/consumers that need it
+            "_raw_detection": detection,
+            "_low_confidence": low_confidence,
+        }
+
+        logger.info("   ✓ Réponse JSON normalisée prête (low_confidence=%s)", low_confidence)
+
         return jsonify({
             "success": True,
             "analysis": analysis,
-            "detection": match
+            "detection": response_detection
         }), 200
 
     except Exception as e:
