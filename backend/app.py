@@ -133,13 +133,16 @@ def detect():
                 "details": str(e)
             }), 500
 
-        # ===== RÉCEPTION DU TYPE DE PLANTE =====
         plant_type_raw = request.form.get('plant_type', '').strip().lower()
         plant_type_map = {
             'mais': 'maïs',
             'manioc': 'manioc',
             'tomate': 'tomate',
             'riz': 'riz',
+            'ble': 'blé',
+            'mil': 'mil',
+            'sorgho': 'sorgho',
+            'coton': 'coton',
         }
         plant_type = plant_type_map.get(plant_type_raw, None)
         if plant_type_raw and plant_type is None:
@@ -247,7 +250,9 @@ def detect():
 
         response_detection = {
             "disease_name": disease_name,
+            "scientific_name": _norm_text(detection.get("scientific_name"), ""),
             "confidence": confidence,
+            "confidence_score": confidence,
             "symptoms": symptoms,
             "causes": causes,
             "treatment": treatment,
