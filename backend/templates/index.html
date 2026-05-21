@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#10b981">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>🌿 Détecteur de Maladies - Plantes Saines</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <!-- Header Sticky -->
+        <header class="header">
+            <div class="header-content">
+                <h1 class="header-title">🌿 Système Intelligent de Détection des Maladies des Cultures</h1>
+                <p class="header-subtitle">Analyse automatique des feuilles agricoles par vision artificielle</p>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            
+            <!-- Capture Section - Mobile First -->
+            <section class="capture-section">
+                <div class="capture-header" style="display:flex;align-items:center;justify-content:center;gap:10px;text-align:center;margin-bottom:12px;">
+                    
+                    <h2 style="margin:0;color:#10b981;">Capture ou importation de feuille</h2>
+                </div>
+                <!-- Image Preview -->
+                <div id="imagePreview" class="image-preview-container hidden">
+                    <div class="preview-wrapper">
+                            <img id="previewImg" src="" alt="Aperçu de la feuille">
+                            <div id="previewLoading" class="preview-loading hidden" aria-hidden="true">
+                                <div class="spinner-ring small"></div>
+                            </div>
+                            <div class="preview-overlay">
+                                <button id="resetBtn" class="btn-reset" title="Changer l'image" aria-label="Changer l'image">
+                                    <span>↻</span>
+                                </button>
+                            </div>
+                    </div>
+                </div>
+
+                <!-- Placeholder Upload -->
+                <div id="uploadPlaceholder" class="upload-placeholder">
+                    <div class="placeholder-content">
+                        <div class="placeholder-icon">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="1"></circle>
+                                <path d="M19 12a7 7 0 1 1-14 0 7 7 0 0 1 14 0"></path>
+                                <path d="M12 5v6m-3-3h6"></path>
+                            </svg>
+                        </div>
+                        <p class="placeholder-text">Prenez ou choisissez une photo</p>
+                        <p class="placeholder-hint">Photographiez la feuille de la plante</p>
+                    </div>
+                </div>
+
+                <!-- Hidden File Input (accessible) -->
+                <input 
+                    type="file" 
+                    id="imageInput" 
+                    accept="image/*" 
+                    capture="environment"
+                    aria-label="Prendre une photo ou choisir une image"
+                    hidden
+                >
+
+                <!-- Plant type selector -->
+                <div class="plant-selector">
+                    <label for="plantType">Type de plante</label>
+                    <select id="plantType" aria-label="Sélectionner le type de plante">
+                        <option value="mais">Maïs</option>
+                        <option value="manioc">Manioc</option>
+                        <option value="tomate">Tomate</option>
+                        <option value="riz">Riz</option>
+                        <option value="arachide">Arachide</option>
+                        <option value="mil">Mil</option>
+                        <option value="sorgho">Sorgho</option>
+                        <option value="pomme de terre">Pomme de terre</option>
+                    </select>
+                </div>
+            </section>
+            <!-- Sticky Action Bar (mobile) -->
+            <nav class="action-bar" role="navigation" aria-label="Actions principales">
+                <div class="action-buttons">
+                    <button id="cameraBtn" class="btn btn-camera" aria-label="Ouvrir la caméra">
+                        <span class="btn-icon">📸</span>
+                        <span class="btn-label">Caméra</span>
+                    </button>
+                    <button id="uploadBtn" class="btn btn-upload" aria-label="Choisir depuis la galerie">
+                        <span class="btn-icon">🖼️</span>
+                        <span class="btn-label">Galerie</span>
+                    </button>
+                    <button id="analyzeBtn" class="btn btn-analyze" disabled aria-label="Analyser l'image">
+                        <span class="btn-icon">🔍</span>
+                        <span class="btn-label">Analyser</span>
+                    </button>
+                </div>
+            </nav>
+
+            <!-- Loading State -->
+            <div id="loadingSpinner" class="loading-state hidden">
+                <div class="spinner-ring"></div>
+                <div class="spinner-text">
+                    <p class="spinner-title">Analyse de la feuille en cours...</p>
+                </div>
+            </div>
+
+            <!-- Results Section -->
+            <section id="resultsSection" class="results-section hidden">
+                <div class="result-container">
+                    <!-- Main Disease Card -->
+                    <div class="disease-card">
+                        <div class="disease-header">
+                            <div class="disease-icon">🦠</div>
+                            <div class="disease-info">
+                                <h2 id="diseaseName" class="disease-title">-</h2>
+                                <p id="scientificName" class="disease-scientific">-</p>
+                            </div>
+                            <div class="disease-badge">
+                                <span id="diagnosticBadge" class="badge">Diagnostic IA</span>
+                            </div>
+                        </div>
+
+                        <!-- Confidence Gauge -->
+                        <div class="confidence-section">
+                            <div class="confidence-header">
+                                <span>Confiance du diagnostic</span>
+                                <span id="confidenceText" class="confidence-value">0%</span>
+                            </div>
+                            <div class="confidence-bar">
+                                <div id="confidenceBar" class="confidence-fill"></div>
+                            </div>
+                        </div>
+
+                        <!-- Quick Stats -->
+                        <div class="stats-grid">
+                            <div class="stat-card">
+                                <div class="stat-value" id="affectedZones">-</div>
+                                <div class="stat-label">Zones affectées</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value" id="severity">-</div>
+                                <div class="stat-label">Sévérité</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value" id="healthScore">-</div>
+                                <div class="stat-label">Santé globale</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Symptoms Card -->
+                    <div class="info-card symptoms-card">
+                        <div class="card-header">
+                            <span class="card-icon">🔍</span>
+                            <h3>Symptômes observés</h3>
+                        </div>
+                        <p id="symptoms" class="card-content">-</p>
+                    </div>
+
+                    <!-- Causes Card -->
+                    <div class="info-card causes-card">
+                        <div class="card-header">
+                            <span class="card-icon">⚠️</span>
+                            <h3>Causes</h3>
+                        </div>
+                        <p id="causes" class="card-content">-</p>
+                    </div>
+
+                    <!-- Treatment Card -->
+                    <div class="info-card treatment-card">
+                        <div class="card-header">
+                            <span class="card-icon">💊</span>
+                            <h3>Traitement recommandé</h3>
+                        </div>
+                        <p id="treatment" class="card-content">-</p>
+                    </div>
+
+                    <!-- Prevention Card -->
+                    <div class="info-card prevention-card">
+                        <div class="card-header">
+                            <span class="card-icon">🛡️</span>
+                            <h3>Prévention</h3>
+                        </div>
+                        <p id="prevention" class="card-content">-</p>
+                    </div>
+
+                    <!-- Action Buttons -->
+                    <div class="result-actions">
+                        <button id="newAnalysisBtn" class="btn btn-new-analysis">
+                            🔄 Nouvelle analyse
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Error State -->
+            <div id="errorSection" class="error-state hidden">
+                <div class="error-box">
+                    <div class="error-icon">⚠️</div>
+                    <p id="errorMessage" class="error-text">Une erreur s'est produite</p>
+                    <button id="closeErrorBtn" class="btn btn-error-close">
+                        Fermer
+                    </button>
+                </div>
+            </div>
+
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>Détecteur de maladies des plantes 🌱</p>
+            <p class="footer-version">v1.0 - 2026</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
