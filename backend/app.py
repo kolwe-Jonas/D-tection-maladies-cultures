@@ -168,14 +168,16 @@ def detect():
                 "plant_type_received": plant_type_raw
             }), 400
 
-        # ===== VALIDATION FEUILLE (BLOQUANTE — formule structurelle) =====
+        # ===== VALIDATION FEUILLE (système probabiliste à 3 niveaux) =====
         try:
             leaf_check = validate_leaf_image(image, plant_type=plant_type)
             logger.info(
                 f"   🌿 Validation feuille: is_leaf={leaf_check['is_leaf']} "
+                f"low_confidence={leaf_check.get('low_confidence_leaf', False)} "
                 f"leaf_score={leaf_check.get('leaf_score', 0):.3f} "
-                f"(shape={leaf_check.get('shape_score', 0):.2f}, "
+                f"(color={leaf_check.get('color_score', 0):.2f}, "
                 f"texture={leaf_check.get('texture_score', 0):.2f}, "
+                f"shape={leaf_check.get('shape_score', 0):.2f}, "
                 f"vein={leaf_check.get('vein_score', 0):.2f})"
             )
             if not leaf_check["is_leaf"]:
@@ -184,7 +186,6 @@ def detect():
                 except Exception:
                     pass
                 logger.warning(f"   ❌ Image rejetée — {leaf_check.get('reason', '')}")
-                # Message spécifique manioc
                 if plant_type == "manioc":
                     error_msg = (
                         "❌ Image invalide : aucune feuille de manioc clairement structurée détectée. "
@@ -197,11 +198,26 @@ def detect():
                     "is_leaf": False,
                     "error": error_msg,
                     "leaf_score": leaf_check.get("leaf_score", 0),
+                    "color_score": leaf_check.get("color_score", 0),
                     "shape_score": leaf_check.get("shape_score", 0),
                     "texture_score": leaf_check.get("texture_score", 0),
                     "vein_score": leaf_check.get("vein_score", 0),
                     "reason": leaf_check.get("reason", ""),
                 }), 400
+
+            # Avertissement feuille incertaine (0.60 ≤ score < 0.80)
+            leaf_warning = None
+            if leaf_check.get("low_confidence_leaf"):
+                leaf_warning = (
+                    "⚠️ Feuille détectée avec une confiance limitée "
+                    "(possible mauvaise lumière, flou ou feuille partiellement visible). "
+                    "Le résultat peut être moins précis."
+                )
+                logger.info(
+                    f"   ⚠️ Feuille acceptée avec avertissement "
+                    f"(leaf_score={leaf_check.get('leaf_score', 0):.3f})"
+                )
+
         except Exception as e:
             logger.error(f"   ❌ Validation feuille — erreur inattendue: {str(e)}", exc_info=True)
             try:
@@ -356,7 +372,8 @@ def detect():
         return jsonify({
             "success": True,
             "analysis": analysis,
-            "detection": response_detection
+            "detection": response_detection,
+            "leaf_warning": leaf_warning,
         }), 200
 
     except Exception as e:
