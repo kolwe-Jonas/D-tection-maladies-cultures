@@ -784,51 +784,141 @@ def analyze_leaf(image: object, debug: bool = False) -> Dict[str, object]:
         return result
 
 
-def validate_leaf_image(image: object) -> Dict[str, object]:
-        """Validation multi-composantes stricte d'une image de feuille agricole.
+def _detect_fabric_pattern(gray: np.ndarray, total_pixels: float) -> Tuple[bool, str]:
+        """Détecte si l'image contient un tissu/vêtement via analyse de périodicité (FFT).
+
+        Tissu = motif régulier → pics FFT intenses hors DC.
+        Feuille = texture irrégulière → pas de périodicité.
+
+        Retourne (is_fabric, reason).
+        """
+        # Normalise et passe en float32
+        f_img = np.float32(gray) / 255.0
+        dft = np.fft.fft2(f_img)
+        dft_shift = np.fft.fftshift(dft)
+        magnitude = np.abs(dft_shift)
+
+        h, w = gray.shape
+        cy, cx = h // 2, w // 2
+
+        # Masquer le composant DC (centre) pour ne regarder que la périodicité
+        mask_radius = max(5, min(h, w) // 12)
+        ys, xs = np.ogrid[:h, :w]
+        dc_mask = ((ys - cy) ** 2 + (xs - cx) ** 2) <= mask_radius ** 2
+        mag_no_dc = magnitude.copy()
+        mag_no_dc[dc_mask] = 0.0
+
+        # Top-N pics non-DC
+        flat = mag_no_dc.flatten()
+        top_n = min(20, len(flat))
+        top_vals = np.partition(flat, -top_n)[-top_n:]
+        peak_ratio = float(np.mean(top_vals)) / (float(np.mean(magnitude)) + 1e-6)
+
+        # Tissu = peaks FFT très élevés (périodicité), ratio > 15
+        is_fabric = peak_ratio > 15.0
+        reason = f"tissu détecté (FFT peak_ratio={peak_ratio:.1f})" if is_fabric else f"texture apériodique (peak_ratio={peak_ratio:.1f})"
+        return is_fabric, reason
+
+
+def _compute_vein_structure_score(
+        img: np.ndarray,
+        gray: np.ndarray,
+        total_pixels: float,
+) -> Tuple[float, float, float, str]:
+        """Calcule un score de structure vasculaire (nervures) multi-échelles.
+
+        Retourne (vein_score, pct_primary_veins, pct_secondary_veins, note).
+        - Nervure primaire  : kernel large (25×25) → nervure centrale
+        - Nervures secondaires : kernel moyen (13×13)
+        - Nervures tertiaires  : kernel petit (7×7)
+        """
+        green_ch = img[:, :, 1]
+
+        def tophat_pct(ksize: int, thresh: int = 10) -> float:
+                k = cv2.getStructuringElement(cv2.MORPH_RECT, (ksize, ksize))
+                th = cv2.morphologyEx(green_ch, cv2.MORPH_TOPHAT, k)
+                _, m = cv2.threshold(th, thresh, 255, cv2.THRESH_BINARY)
+                return 100.0 * float(np.count_nonzero(m)) / total_pixels
+
+        pct_primary = tophat_pct(25, thresh=12)    # nervure centrale forte
+        pct_secondary = tophat_pct(13, thresh=10)  # ramifications 2nd ordre
+        pct_tertiary = tophat_pct(7, thresh=8)     # nervures fines
+
+        # Ratio ramification : si secondaires >> primaires → réseau complexe = feuille
+        ramification = pct_secondary / (pct_primary + 0.5)
+
+        if pct_primary < 0.5 and pct_secondary < 1.0:
+                # Aucune nervure visible → tissu, peau, fond
+                score = 0.0
+                note = f"aucune nervure (prim={pct_primary:.1f}%, sec={pct_secondary:.1f}%)"
+        elif pct_primary >= 1.5 and pct_secondary >= 3.0 and ramification >= 1.5:
+                # Réseau veineux complet avec ramifications
+                score = min(1.0, 0.70 + min(0.30, (pct_tertiary / 10.0)))
+                note = f"réseau veineux complet (prim={pct_primary:.1f}%, sec={pct_secondary:.1f}%, ram={ramification:.1f})"
+        elif pct_secondary >= 2.0:
+                score = 0.50 + min(0.30, pct_secondary / 20.0)
+                note = f"nervures partielles (sec={pct_secondary:.1f}%, ram={ramification:.1f})"
+        else:
+                score = 0.20
+                note = f"nervures faibles (prim={pct_primary:.1f}%, sec={pct_secondary:.1f}%)"
+
+        return round(score, 3), round(pct_primary, 2), round(pct_secondary, 2), note
+
+
+def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict[str, object]:
+        """Validation multi-composantes stricte — formule structurelle.
 
         Formule pondérée :
-            leaf_score = color_score * 0.30 + shape_score * 0.40 + texture_score * 0.30
+            leaf_score = shape_score * 0.40 + texture_score * 0.40 + vein_score * 0.20
 
-        Chaque score est normalisé 0.0–1.0 :
-        - color_score  : ExG positif obligatoire + couverture végétale (anti habits verts)
-        - shape_score  : forme biologique organique — rejette rectangles, cercles, silhouettes
-        - texture_score: nervures détectées + surface non uniforme (rejette mur/tissu/peau)
+        La COULEUR est un filtre bloquant (ExG doit être positif) mais n'entre PAS
+        dans le score final — évite les faux positifs sur vêtements colorés.
 
-        Seuil de validation : leaf_score >= 0.60
-        Principe : préférer le refus au doute (zéro faux positifs).
+        Rejette impérativement :
+        - Vêtements (même orange/jaune/vert) : tissu uniforme + absence nervures
+        - Mains / visages : peau dominante + pas de structure vasculaire
+        - Murs / sols : surface plate, aucune nervure
+        - Objets artificiels : forme géométrique rigide
+
+        Si plant_type == "manioc" : exigences structurelles renforcées (lobes + nervures).
+
+        Seuil standard : leaf_score >= 0.60
+        Seuil manioc   : leaf_score >= 0.62 + vein_score >= 0.40
 
         Retourne:
                 {
                         "is_leaf": True/False,
                         "confidence": 0-100,
                         "leaf_score": float,
-                        "color_score": float,
                         "shape_score": float,
                         "texture_score": float,
+                        "vein_score": float,
                         "reason": str
                 }
         """
         LEAF_THRESHOLD = 0.60
+        MANIOC_THRESHOLD = 0.62
+        MANIOC_MIN_VEIN = 0.40
+
+        def _reject(reason: str, shape: float = 0.0, tex: float = 0.0, vein: float = 0.0) -> Dict:
+                ls = round(shape * 0.40 + tex * 0.40 + vein * 0.20, 4)
+                return {
+                        "is_leaf": False, "confidence": int(ls * 100),
+                        "leaf_score": ls, "shape_score": shape,
+                        "texture_score": tex, "vein_score": vein,
+                        "reason": reason,
+                }
 
         try:
                 img = load_image(image)
                 img = _ensure_small(img, max_dim=640)
         except Exception as exc:
-                return {
-                        "is_leaf": False, "confidence": 0, "leaf_score": 0.0,
-                        "color_score": 0.0, "shape_score": 0.0, "texture_score": 0.0,
-                        "reason": f"Impossible de charger l'image : {exc}",
-                }
+                return _reject(f"Impossible de charger l'image : {exc}")
 
         h, w = img.shape[:2]
         total_pixels = float(h * w)
         if total_pixels < 400:
-                return {
-                        "is_leaf": False, "confidence": 0, "leaf_score": 0.0,
-                        "color_score": 0.0, "shape_score": 0.0, "texture_score": 0.0,
-                        "reason": "Image trop petite",
-                }
+                return _reject("Image trop petite")
 
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
@@ -837,19 +927,14 @@ def validate_leaf_image(image: object) -> Dict[str, object]:
         g_f = img[:, :, 1].astype(np.float32)
         r_f = img[:, :, 2].astype(np.float32)
 
-        color_notes: List[str] = []
-        shape_notes: List[str] = []
-        texture_notes: List[str] = []
-
         # ==============================================================
-        # A. COLOR_SCORE (0-1) — ExG OBLIGATOIREMENT POSITIF
-        #    La couleur seule NE VALIDE PAS (anti habits verts)
+        # PRÉ-FILTRE COULEUR — ExG obligatoirement positif (bloquant)
+        # La couleur seule NE VALIDE PAS → anti habits verts/orange
         # ==============================================================
         exg = 2.0 * g_f - r_f - b_f
         mean_exg = float(np.mean(exg))
         pct_exg = 100.0 * float(np.count_nonzero(exg > 8)) / total_pixels
 
-        # Couverture végétale élargie (vert + jaune/brun pour feuilles malades)
         green_m = ((hue >= 25) & (hue <= 90) & (sat > 28) & (val > 28)).astype(np.uint8)
         yellow_m = ((hue >= 11) & (hue <= 36) & (sat > 32) & (val > 45)).astype(np.uint8)
         brown_m = ((hue >= 4) & (hue <= 22) & (sat > 25) & (val > 20)).astype(np.uint8)
@@ -859,216 +944,201 @@ def validate_leaf_image(image: object) -> Dict[str, object]:
         ).astype(np.uint8)
         pct_veg = 100.0 * float(np.count_nonzero(veg_m)) / total_pixels
 
-        if mean_exg <= 0:
-                # ExG négatif = très peu probable d'être une feuille
-                color_score = 0.05
-                color_notes.append(f"ExG négatif ({mean_exg:.1f}) — non végétal")
-        elif pct_exg >= 25.0 and pct_veg >= 25.0:
-                color_score = 1.0
-                color_notes.append(f"ExG fort ({pct_exg:.0f}%) + végétation ({pct_veg:.0f}%)")
-        elif pct_exg >= 15.0 and pct_veg >= 15.0:
-                color_score = 0.80
-                color_notes.append(f"ExG correct ({pct_exg:.0f}%) + végétation ({pct_veg:.0f}%)")
-        elif pct_exg >= 8.0 and pct_veg >= 8.0:
-                color_score = 0.60
-                color_notes.append(f"ExG partiel ({pct_exg:.0f}%)")
-        elif pct_exg >= 3.0 and mean_exg > 0:
-                color_score = 0.35
-                color_notes.append(f"ExG faible ({pct_exg:.0f}%)")
-        else:
-                color_score = 0.10
-                color_notes.append(f"végétation insuffisante ({pct_veg:.0f}%)")
+        # Hard reject : couleur non végétale ET ExG négatif
+        if mean_exg <= 0 and pct_veg < 8.0:
+                return _reject(f"ExG négatif ({mean_exg:.1f}) + végétation absente ({pct_veg:.0f}%) — non végétal")
 
-        # Pénalité : fond bleu/gris/peau dominant sans végétation
-        gray_dom = ((sat < 22) & (val > 40)).astype(np.uint8)
-        pct_gray = 100.0 * float(np.count_nonzero(gray_dom)) / total_pixels
-        blue_dom = ((hue >= 95) & (hue <= 135) & (sat > 38) & (val > 45)).astype(np.uint8)
-        pct_blue = 100.0 * float(np.count_nonzero(blue_dom)) / total_pixels
+        # ==============================================================
+        # DÉTECTION TISSU / VÊTEMENT (REJET IMMÉDIAT)
+        # Tissu orange/jaune/vert = faux positif couleur classique
+        # ==============================================================
+        is_fabric, fabric_reason = _detect_fabric_pattern(gray, total_pixels)
+
+        # Variance locale (16×16 blocs) — tissu = variance très uniforme entre blocs
+        block = 16
+        bh_b, bw_b = h // block, w // block
+        local_vars_b: List[float] = []
+        for bi in range(bh_b):
+                for bj in range(bw_b):
+                        patch = gray[bi * block:(bi + 1) * block, bj * block:(bj + 1) * block]
+                        local_vars_b.append(float(patch.var()))
+        local_var_mean = float(np.mean(local_vars_b)) if local_vars_b else 0.0
+        local_var_std = float(np.std(local_vars_b)) if local_vars_b else 0.0
+        non_uniformity = local_var_std / (local_var_mean + 1.0)
+
+        # Tissu = local_var_std très faible ET variance globale faible
+        lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        fabric_uniform = non_uniformity < 0.35 and lap_var < 60.0
+
         skin_dom = ((hue >= 2) & (hue <= 18) & (sat > 25) & (sat < 160) & (val > 60)).astype(np.uint8)
         pct_skin = 100.0 * float(np.count_nonzero(skin_dom)) / total_pixels
 
-        if pct_gray > 55.0 and pct_veg < 15.0:
-                color_score *= 0.3
-                color_notes.append(f"fond gris/blanc dominant ({pct_gray:.0f}%)")
-        if pct_blue > 35.0 and pct_veg < 15.0:
-                color_score *= 0.3
-                color_notes.append(f"fond bleu dominant ({pct_blue:.0f}%)")
-        if pct_skin > 30.0 and pct_veg < 15.0:
-                color_score *= 0.2
-                color_notes.append(f"peau humaine dominante ({pct_skin:.0f}%)")
-
-        color_score = max(0.0, min(1.0, color_score))
+        if is_fabric and fabric_uniform and pct_veg < 25.0:
+                return _reject(f"vêtement/tissu détecté ({fabric_reason}) — texture uniforme périodique")
+        if pct_skin > 40.0 and pct_veg < 15.0:
+                return _reject(f"peau humaine dominante ({pct_skin:.0f}%) — rejet")
 
         # ==============================================================
-        # B. SHAPE_SCORE (0-1) — CRITIQUE : forme biologique organique
-        #    Rejette : rectangles, cercles, silhouettes humaines, objets
-        #    Feuille attendue : solidity 0.60–0.90
+        # A. SHAPE_SCORE (0-1, poids 40%)
+        #    Forme biologique organique — rejette géométries artificielles
+        #    Feuille : solidity 0.55–0.95 selon type
         # ==============================================================
         blurred = cv2.GaussianBlur(gray, (9, 9), 0)
         _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         contours_v, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         shape_score = 0.0
+        shape_note = "aucun contour"
+        solidity_val = 0.0
+        compactness_val = 0.0
+        coverage_val = 0.0
+
         if contours_v:
-                # Utiliser le plus grand contour (objet principal)
                 largest_v = max(contours_v, key=cv2.contourArea)
                 c_area = float(cv2.contourArea(largest_v))
                 c_perim = float(cv2.arcLength(largest_v, True))
-                coverage = c_area / total_pixels
+                coverage_val = c_area / total_pixels
 
-                if coverage < 0.03:
-                        # Objet trop petit ou arrière-plan dominant
+                if coverage_val < 0.03:
                         shape_score = 0.10
-                        shape_notes.append(f"objet trop petit ({coverage*100:.0f}% image)")
+                        shape_note = f"objet trop petit ({coverage_val*100:.0f}%)"
                 elif c_perim > 0:
                         hull_v = cv2.convexHull(largest_v)
                         hull_area = float(cv2.contourArea(hull_v))
-                        solidity = c_area / hull_area if hull_area > 0 else 0.0
-                        # Isoperimetric quotient : 1.0 = cercle parfait, 0.785 = carré, feuille << 0.60
-                        compactness = (4.0 * np.pi * c_area) / (c_perim ** 2)
+                        solidity_val = c_area / hull_area if hull_area > 0 else 0.0
+                        compactness_val = (4.0 * np.pi * c_area) / (c_perim ** 2)
 
-                        # Nombre de lignes droites (Hough) — formes géométriques artificielles
                         edges_c = cv2.Canny(gray, 50, 150)
                         lines_c = cv2.HoughLinesP(
-                                edges_c, 1, np.pi / 180,
-                                threshold=55,
-                                minLineLength=int(min(h, w) * 0.20),
-                                maxLineGap=8,
+                                edges_c, 1, np.pi / 180, threshold=55,
+                                minLineLength=int(min(h, w) * 0.20), maxLineGap=8,
                         )
                         n_lines = len(lines_c) if lines_c is not None else 0
 
-                        # --- Rejet formes géométriques ---
-                        if solidity > 0.97 and compactness > 0.70:
-                                # Rectangle ou forme très convexe (tissu plié, papier, écran)
+                        if solidity_val > 0.97 and compactness_val > 0.70:
                                 shape_score = 0.05
-                                shape_notes.append(f"forme rectangulaire/artificielle (solid={solidity:.2f}, compact={compactness:.2f})")
-                        elif compactness > 0.85:
-                                # Trop circulaire (objet rond)
-                                shape_score = 0.10
-                                shape_notes.append(f"forme trop circulaire (compact={compactness:.2f})")
-                        elif n_lines >= 8 and pct_veg < 20.0:
-                                # Structure géométrique rigide (bâtiment, meuble)
-                                shape_score = 0.15
-                                shape_notes.append(f"structure linéaire rigide ({n_lines} lignes droites)")
-                        elif 0.60 <= solidity <= 0.93 and compactness < 0.75:
-                                # Zone dorée : solidity [0.60–0.93] = profil feuille typique
-                                base = 0.70
-                                # Bonus coverage (feuille bien centrée)
-                                if coverage >= 0.25:
-                                        base += 0.20
-                                elif coverage >= 0.10:
-                                        base += 0.10
-                                # Bonus irrégularité (contour lobé/dentelé)
-                                if compactness < 0.40:
-                                        base += 0.10
+                                shape_note = f"forme rectangulaire/artificielle (sol={solidity_val:.2f})"
+                        elif compactness_val > 0.85:
+                                shape_score = 0.08
+                                shape_note = f"forme trop circulaire (cpt={compactness_val:.2f})"
+                        elif n_lines >= 8 and pct_veg < 22.0:
+                                shape_score = 0.12
+                                shape_note = f"structure linéaire rigide ({n_lines} lignes)"
+                        elif 0.60 <= solidity_val <= 0.95 and compactness_val < 0.75:
+                                base = 0.68
+                                if coverage_val >= 0.25:
+                                        base += 0.22
+                                elif coverage_val >= 0.10:
+                                        base += 0.12
+                                if compactness_val < 0.40:
+                                        base += 0.10  # contour irrégulier/lobé
                                 shape_score = min(1.0, base)
-                                shape_notes.append(f"forme feuille (solid={solidity:.2f}, compact={compactness:.2f}, couv={coverage*100:.0f}%)")
-                        elif 0.50 <= solidity < 0.60 and compactness < 0.70:
-                                # Feuille lobée/palmée (manioc, coton) — solidity plus basse acceptable
-                                shape_score = 0.55
-                                shape_notes.append(f"forme lobée possible (solid={solidity:.2f})")
-                        elif 0.93 < solidity <= 0.97 and compactness < 0.65:
-                                # Feuille allongée (maïs, riz) — très convexe mais compacité faible
-                                shape_score = 0.65
-                                shape_notes.append(f"feuille allongée (solid={solidity:.2f})")
+                                shape_note = f"forme feuille (sol={solidity_val:.2f}, cpt={compactness_val:.2f}, cov={coverage_val*100:.0f}%)"
+                        elif 0.50 <= solidity_val < 0.60 and compactness_val < 0.68:
+                                # Feuille palmée/lobée (manioc, coton) — solidity basse = lobes
+                                base = 0.58
+                                if coverage_val >= 0.15:
+                                        base += 0.12
+                                shape_score = min(1.0, base)
+                                shape_note = f"feuille lobée/palmée (sol={solidity_val:.2f})"
+                        elif 0.95 < solidity_val <= 0.98 and compactness_val < 0.60:
+                                shape_score = 0.60
+                                shape_note = f"feuille allongée (sol={solidity_val:.2f})"
                         else:
-                                shape_score = 0.20
-                                shape_notes.append(f"forme non végétale (solid={solidity:.2f}, compact={compactness:.2f})")
-        else:
-                shape_score = 0.05
-                shape_notes.append("aucun contour détecté")
+                                shape_score = 0.18
+                                shape_note = f"forme non végétale (sol={solidity_val:.2f}, cpt={compactness_val:.2f})"
 
         shape_score = max(0.0, min(1.0, shape_score))
 
         # ==============================================================
-        # C. TEXTURE_SCORE (0-1) — ULTRA IMPORTANT
-        #    Détection nervures + surface non uniforme
-        #    Rejette : mur, tissu, peau, fond plat
+        # B. TEXTURE_SCORE (0-1, poids 40%)
+        #    Surface non uniforme + rugosité biologique
+        #    Rejet : mur, tissu, peau (surfaces plates/périodiques)
         # ==============================================================
-        lap = cv2.Laplacian(gray, cv2.CV_64F)
-        lap_var = float(lap.var())
-
-        # Détection nervures via top-hat (structures linéaires fines dans le canal vert)
-        green_ch = img[:, :, 1]
-        for ksize in (15, 11):
-                tk = cv2.getStructuringElement(cv2.MORPH_RECT, (ksize, ksize))
-                tophat = cv2.morphologyEx(green_ch, cv2.MORPH_TOPHAT, tk)
-                _, vein_m = cv2.threshold(tophat, 10, 255, cv2.THRESH_BINARY)
-                pct_veins = 100.0 * float(np.count_nonzero(vein_m)) / total_pixels
-                if pct_veins >= 2.0:
-                        break
-
-        # Variance locale dans des blocs 16×16 (mesure de non-uniformité)
-        block = 16
-        bh, bw2 = h // block, w // block
-        local_vars: List[float] = []
-        for bi in range(bh):
-                for bj in range(bw2):
-                        patch = gray[bi * block:(bi + 1) * block, bj * block:(bj + 1) * block]
-                        local_vars.append(float(patch.var()))
-        local_var_mean = float(np.mean(local_vars)) if local_vars else 0.0
-        local_var_std = float(np.std(local_vars)) if local_vars else 0.0
-        non_uniformity = local_var_std / (local_var_mean + 1.0)  # haute = surface naturelle
-
-        if lap_var < 12.0:
-                # Surface plate / très lisse → mur, tissu, peau bien éclairée
+        texture_note = ""
+        if lap_var < 10.0:
                 texture_score = 0.0
-                texture_notes.append(f"surface plate/lisse (Lap={lap_var:.0f}) — rejet")
-        elif lap_var < 35.0:
-                texture_score = 0.20
-                texture_notes.append(f"texture faible (Lap={lap_var:.0f})")
-        elif lap_var < 80.0:
-                base_t = 0.50
-                if pct_veins >= 3.0:
-                        base_t += 0.20
-                if non_uniformity > 0.8:
-                        base_t += 0.10
+                texture_note = f"surface plate (Lap={lap_var:.0f}) — rejet tissu/mur"
+        elif lap_var < 30.0:
+                texture_score = 0.15 + min(0.10, non_uniformity * 0.10)
+                texture_note = f"texture très faible (Lap={lap_var:.0f})"
+        elif lap_var < 70.0:
+                base_t = 0.45 + min(0.20, non_uniformity * 0.15)
                 texture_score = min(1.0, base_t)
-                texture_notes.append(f"texture modérée (Lap={lap_var:.0f}, nervures={pct_veins:.0f}%)")
+                texture_note = f"texture modérée (Lap={lap_var:.0f}, non-unif={non_uniformity:.2f})"
         else:
-                # Texture élevée → surface biologique naturelle
-                base_t = 0.75
-                if pct_veins >= 4.0:
-                        base_t += 0.20
-                elif pct_veins >= 2.0:
-                        base_t += 0.10
-                if non_uniformity > 1.0:
-                        base_t += 0.05
+                base_t = 0.72 + min(0.28, non_uniformity * 0.20)
                 texture_score = min(1.0, base_t)
-                texture_notes.append(f"texture biologique (Lap={lap_var:.0f}, nervures={pct_veins:.0f}%)")
+                texture_note = f"texture biologique élevée (Lap={lap_var:.0f}, non-unif={non_uniformity:.2f})"
+
+        # Pénalité supplémentaire si tissu uniforme détecté (mais pas bloquant seul)
+        if fabric_uniform:
+                texture_score *= 0.55
+                texture_note += " [tissu uniforme détecté]"
 
         texture_score = max(0.0, min(1.0, texture_score))
 
         # ==============================================================
-        # SCORE FINAL PONDÉRÉ
-        # leaf_score = color * 0.30 + shape * 0.40 + texture * 0.30
+        # C. VEIN_STRUCTURE_SCORE (0-1, poids 20%)
+        #    Nervures multi-échelles : primaire + secondaires + tertiaires
+        #    Absence totale → tissu/peau → rejet
         # ==============================================================
-        leaf_score = round(
-                color_score * 0.30 + shape_score * 0.40 + texture_score * 0.30,
-                4,
-        )
-        is_leaf = leaf_score >= LEAF_THRESHOLD
-        confidence = int(round(leaf_score * 100))
+        vein_score, pct_prim, pct_sec, vein_note = _compute_vein_structure_score(img, gray, total_pixels)
 
+        # ==============================================================
+        # SCORE FINAL PONDÉRÉ
+        # leaf_score = shape * 0.40 + texture * 0.40 + vein * 0.20
+        # ==============================================================
+        leaf_score = round(shape_score * 0.40 + texture_score * 0.40 + vein_score * 0.20, 4)
+
+        # Seuil standard
+        threshold = LEAF_THRESHOLD
+        extra_condition_fail = False
+        extra_reason = ""
+
+        # --- Exigences spécifiques manioc ---
+        if plant_type == "manioc":
+                threshold = MANIOC_THRESHOLD
+                # Vein obligatoire pour manioc (nervures palmées visibles)
+                if vein_score < MANIOC_MIN_VEIN:
+                        extra_condition_fail = True
+                        extra_reason = (
+                                f"nervure centrale insuffisante pour manioc "
+                                f"(vein_score={vein_score:.2f} < {MANIOC_MIN_VEIN})"
+                        )
+                # Forme lobée attendue (solidity basse)
+                if solidity_val > 0.90 and coverage_val > 0.10:
+                        extra_condition_fail = True
+                        extra_reason = (
+                                extra_reason + "; " if extra_reason else ""
+                        ) + f"forme trop convexe pour feuille palmée manioc (sol={solidity_val:.2f})"
+
+        is_leaf = (leaf_score >= threshold) and (not extra_condition_fail)
+
+        # --- Message utilisateur ---
         if is_leaf:
-                primary_reason = (shape_notes[0] if shape_notes else "") + " | " + (texture_notes[0] if texture_notes else "")
+                primary_reason = f"{shape_note} | {texture_note}"
         else:
-                bad = []
-                if color_score < 0.50:
-                        bad.append(color_notes[0] if color_notes else "couleur non végétale")
-                if shape_score < 0.50:
-                        bad.append(shape_notes[0] if shape_notes else "forme non biologique")
-                if texture_score < 0.40:
-                        bad.append(texture_notes[0] if texture_notes else "texture plate")
-                primary_reason = "Image rejetée — " + "; ".join(bad) if bad else "Aucune feuille de plante détectée"
+                bad: List[str] = []
+                if extra_condition_fail:
+                        bad.append(extra_reason)
+                if shape_score < 0.45:
+                        bad.append(shape_note)
+                if texture_score < 0.35:
+                        bad.append(texture_note)
+                if vein_score < 0.25:
+                        bad.append(vein_note)
+                if not bad:
+                        bad.append("score global insuffisant")
+                primary_reason = "Image rejetée — " + "; ".join(bad[:2])
 
         return {
                 "is_leaf": is_leaf,
-                "confidence": confidence,
+                "confidence": int(round(leaf_score * 100)),
                 "leaf_score": leaf_score,
-                "color_score": round(color_score, 3),
                 "shape_score": round(shape_score, 3),
                 "texture_score": round(texture_score, 3),
+                "vein_score": round(vein_score, 3),
                 "reason": primary_reason,
         }
 

@@ -1,0 +1,104 @@
+CORRIGER LE PROBLÈME DE CONFUSION ENTRE FEUILLES DE MANIOC ET VÊTEMENTS (ORANGE/JAUNE) EN RENFORÇANT LA DÉTECTION STRUCTURELLE ET TEXTURELLE
+
+OBJECTIF :
+Empêcher absolument toute confusion entre :
+
+* feuilles de manioc
+* vêtements (orange, jaune, tissu uniforme)
+
+==================================================
+
+1. RÈGLE GÉNÉRALE RENFORCÉE
+   ==================================================
+
+Dans validate_leaf_image :
+
+👉 la couleur NE SUFFIT JAMAIS pour valider une feuille
+
+Validation doit être basée sur :
+
+* forme biologique
+* texture naturelle
+* structure interne
+
+==================================================
+2. CAS SPÉCIFIQUE MANIOC (IMPORTANT)
+====================================
+
+Si plant_type == "manioc" :
+
+EXIGER OBLIGATOIREMENT :
+
+A. FORME
+
+* feuille palmée (lobes visibles)
+* segmentation en 5 à 7 lobes
+* structure irrégulière naturelle
+
+B. STRUCTURE INTERNE
+
+* nervure centrale forte
+* ramifications secondaires visibles
+
+C. TEXTURE
+
+* variation interne élevée
+* surface non uniforme
+
+SI UNE DE CES CONDITIONS MANQUE :
+→ REFUSER IMMÉDIATEMENT
+
+==================================================
+3. REJET STRICT DES VÊTEMENTS (CAS CRITIQUE)
+
+Rejeter automatiquement si :
+
+* texture uniforme (tissu détecté)
+* bords réguliers ou cousus
+* absence de nervures biologiques
+* faible variance interne
+* forme trop simple ou plate
+
+IMPORTANT :
+Même si couleur ≈ feuille (orange/jaune/vert) → REFUS
+
+==================================================
+4. SCORE FINAL AMÉLIORÉ
+
+leaf_score doit inclure :
+
+* shape_score (40%)
+* texture_score (40%)
+* vein_structure_score (20%)
+
+SI manioc :
+→ vein_structure_score devient critique (obligatoire)
+
+RÈGLE :
+SI leaf_score < 0.99 → REFUS
+
+==================================================
+5. LOGIQUE DE DÉCISION
+
+SI vêtement détecté (texture uniforme + absence nervures) :
+→ STOP IMMÉDIAT
+→ PAS D’ANALYSE
+
+SI feuille manioc valide :
+→ analyse maladie
+
+==================================================
+6. MESSAGE UTILISATEUR
+
+"❌ Image invalide : aucune feuille de manioc clairement structurée détectée. Veuillez photographier une feuille complète avec ses lobes visibles."
+
+==================================================
+RÉSULTAT ATTENDU
+
+* vêtements orange/jaune → rejet
+* tissu → rejet
+* feuilles manioc → acceptées uniquement si structure réelle visible
+* doute → rejet
+
+SYSTÈME FINAL :
+IA agricole robuste avec compréhension structurelle réelle des feuilles

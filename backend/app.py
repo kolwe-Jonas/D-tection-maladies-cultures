@@ -148,46 +148,7 @@ def detect():
                 "details": str(e)
             }), 500
 
-        # ===== VALIDATION FEUILLE (BLOQUANTE — seuil strict 70) =====
-        try:
-            leaf_check = validate_leaf_image(image)
-            logger.info(
-                f"   🌿 Validation feuille: is_leaf={leaf_check['is_leaf']} "
-                f"confidence={leaf_check['confidence']} reason={leaf_check['reason']}"
-            )
-            if not leaf_check["is_leaf"]:
-                try:
-                    os.remove(filepath)
-                except Exception:
-                    pass
-                logger.warning(
-                    f"   ❌ Image rejetée — leaf_score={leaf_check.get('leaf_score', 0):.3f} "
-                    f"(color={leaf_check.get('color_score', 0):.2f}, "
-                    f"shape={leaf_check.get('shape_score', 0):.2f}, "
-                    f"texture={leaf_check.get('texture_score', 0):.2f})"
-                )
-                return jsonify({
-                    "success": False,
-                    "is_leaf": False,
-                    "error": "❌ Aucune feuille de plante détectée. Veuillez prendre une photo claire d'une feuille centrée.",
-                    "leaf_score": leaf_check.get("leaf_score", 0),
-                    "color_score": leaf_check.get("color_score", 0),
-                    "shape_score": leaf_check.get("shape_score", 0),
-                    "texture_score": leaf_check.get("texture_score", 0),
-                    "reason": leaf_check.get("reason", ""),
-                }), 400
-        except Exception as e:
-            logger.error(f"   ❌ Validation feuille — erreur inattendue: {str(e)}", exc_info=True)
-            try:
-                os.remove(filepath)
-            except Exception:
-                pass
-            return jsonify({
-                "success": False,
-                "error": "❌ Aucune feuille de plante détectée. Veuillez prendre une photo claire d'une feuille centrée.",
-                "details": str(e),
-            }), 400
-
+        # ===== TYPE DE PLANTE (extrait tôt pour la validation structurelle) =====
         plant_type_raw = request.form.get('plant_type', '').strip().lower()
         plant_type_map = {
             'mais': 'maïs',
@@ -205,6 +166,52 @@ def detect():
             return jsonify({
                 "error": "Valeur plant_type invalide",
                 "plant_type_received": plant_type_raw
+            }), 400
+
+        # ===== VALIDATION FEUILLE (BLOQUANTE — formule structurelle) =====
+        try:
+            leaf_check = validate_leaf_image(image, plant_type=plant_type)
+            logger.info(
+                f"   🌿 Validation feuille: is_leaf={leaf_check['is_leaf']} "
+                f"leaf_score={leaf_check.get('leaf_score', 0):.3f} "
+                f"(shape={leaf_check.get('shape_score', 0):.2f}, "
+                f"texture={leaf_check.get('texture_score', 0):.2f}, "
+                f"vein={leaf_check.get('vein_score', 0):.2f})"
+            )
+            if not leaf_check["is_leaf"]:
+                try:
+                    os.remove(filepath)
+                except Exception:
+                    pass
+                logger.warning(f"   ❌ Image rejetée — {leaf_check.get('reason', '')}")
+                # Message spécifique manioc
+                if plant_type == "manioc":
+                    error_msg = (
+                        "❌ Image invalide : aucune feuille de manioc clairement structurée détectée. "
+                        "Veuillez photographier une feuille complète avec ses lobes visibles."
+                    )
+                else:
+                    error_msg = "❌ Aucune feuille de plante détectée. Veuillez prendre une photo claire d'une feuille centrée."
+                return jsonify({
+                    "success": False,
+                    "is_leaf": False,
+                    "error": error_msg,
+                    "leaf_score": leaf_check.get("leaf_score", 0),
+                    "shape_score": leaf_check.get("shape_score", 0),
+                    "texture_score": leaf_check.get("texture_score", 0),
+                    "vein_score": leaf_check.get("vein_score", 0),
+                    "reason": leaf_check.get("reason", ""),
+                }), 400
+        except Exception as e:
+            logger.error(f"   ❌ Validation feuille — erreur inattendue: {str(e)}", exc_info=True)
+            try:
+                os.remove(filepath)
+            except Exception:
+                pass
+            return jsonify({
+                "success": False,
+                "error": "❌ Aucune feuille de plante détectée. Veuillez prendre une photo claire d'une feuille centrée.",
+                "details": str(e),
             }), 400
 
         # ===== ANALYSE DE L'IMAGE =====
