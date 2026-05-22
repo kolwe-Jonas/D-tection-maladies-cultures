@@ -1,0 +1,147 @@
+RENFORCER LE SYSTÈME DE DÉTECTION POUR LE RENDRE STRICT, INTELLIGENT ET COHÉRENT AVEC LE TYPE DE PLANTE CHOISI
+
+OBJECTIF GLOBAL :
+Créer un système agricole fiable qui :
+👉 refuse toute image non feuille
+👉 refuse toute incohérence entre plante sélectionnée et image
+👉 n’analyse QUE des feuilles valides
+
+==================================================
+
+1. FILTRE OBLIGATOIRE AVANT TOUTE ANALYSE
+   ==================================================
+
+Dans backend/app.py → route /detect :
+
+ÉTAPE 1 (OBLIGATOIRE) :
+
+* Récupérer image
+* Récupérer plant_type sélectionné par utilisateur
+
+ÉTAPE 2 :
+Appeler :
+
+validate_leaf_image(image)
+
+==================================================
+2. RÈGLE ABSOLUE (BLOQUANTE)
+============================
+
+SI :
+
+* is_leaf == False
+  OU
+* confidence < 70
+
+ALORS :
+STOP IMMÉDIAT
+
+Retour :
+
+{
+"success": false,
+"is_leaf": false,
+"error": "Image rejetée : veuillez envoyer uniquement une feuille de plante.",
+"confidence": confidence
+}
+
+AUCUNE analyse maladie ne doit être exécutée.
+
+==================================================
+3. VALIDATION DE COHÉRENCE PLANTE (NOUVEAU)
+===========================================
+
+Ajouter une nouvelle fonction :
+
+validate_plant_match(image_analysis, plant_type)
+
+BUT :
+vérifier que l’image correspond bien au type de plante sélectionné.
+
+EXEMPLES :
+
+* utilisateur = "arachide"
+  → image doit contenir feuille type légumineuse
+  → texture + forme compatibles
+
+* utilisateur = "tomate"
+  → feuille large + lobée attendue
+
+* utilisateur = "riz"
+  → feuille fine et longue attendue
+
+SI incohérence détectée :
+→ REFUSER ANALYSE
+
+Retour :
+
+{
+"success": false,
+"is_leaf": true,
+"plant_match": false,
+"error": "Cette image ne correspond pas au type de plante sélectionné. Veuillez choisir une image correcte."
+}
+
+==================================================
+4. PIPELINE FINAL OBLIGATOIRE
+=============================
+
+Ordre strict :
+
+1. validate_leaf_image
+2. SI OK → analyze_leaf
+3. SI OK → disease_detector
+4. THEN validate_plant_match
+5. SI OK → résultat final
+
+==================================================
+5. RENFORCEMENT IA FEUILLE
+
+Dans image_analysis.py :
+
+Améliorer validation avec :
+
+* ExG index obligatoire positif
+* minimum 60–70% zone verte
+* rejet objets non biologiques
+* rejet formes géométriques
+* détection texture naturelle (nervures)
+* rejet fond dominant
+
+SI doute → REFUS
+
+==================================================
+6. UX (MESSAGE UTILISATEUR)
+
+Cas 1 (pas feuille) :
+"❌ Image invalide : veuillez envoyer uniquement une feuille de plante."
+
+Cas 2 (mauvaise plante) :
+"❌ L’image ne correspond pas au type de plante sélectionné."
+
+==================================================
+7. CONTRAINTES IMPORTANTES
+
+NE PAS modifier :
+
+* UI design
+* structure globale backend
+* base de données
+* endpoints existants
+
+UNIQUEMENT :
+
+* logique validation image
+* pipeline analyse
+
+==================================================
+RÉSULTAT FINAL ATTENDU
+
+* voiture → rejet
+* mur → rejet
+* main → rejet
+* feuille correcte + bon type → analysée
+* feuille correcte mais mauvais type → rejet
+
+SYSTÈME FINAL :
+IA agricole intelligente, stricte et fiable niveau production

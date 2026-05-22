@@ -785,10 +785,17 @@ def analyze_leaf(image: object, debug: bool = False) -> Dict[str, object]:
 
 
 def validate_leaf_image(image: object) -> Dict[str, object]:
-        """Valide si l'image contient une feuille/plante visible.
+        """Valide strictement si l'image contient une feuille/plante visible.
 
-        Vérifie : présence de vert végétal, indice ExG, forme organique,
-        texture naturelle, absence de fond artificiel.
+        Critères stricts :
+        1. Couverture végétale suffisante (vert + jaune/brun pour feuilles malades)
+        2. Indice ExG positif obligatoire sur zone significative
+        3. Forme organique non-géométrique
+        4. Texture naturelle (nervures, rugosité biologique)
+        5. Absence de fond artificiel dominant
+        6. Rejet formes géométriques parfaites (bâtiments, objets)
+
+        Seuil de validation : confidence >= 70 (strict)
 
         Retourne:
                 {
@@ -799,7 +806,7 @@ def validate_leaf_image(image: object) -> Dict[str, object]:
         """
         try:
                 img = load_image(image)
-                img = _ensure_small(img, max_dim=600)
+                img = _ensure_small(img, max_dim=640)
         except Exception as exc:
                 return {"is_leaf": False, "confidence": 0, "reason": f"Impossible de charger l'image : {exc}"}
 
@@ -814,42 +821,62 @@ def validate_leaf_image(image: object) -> Dict[str, object]:
 
         score = 0
         reasons: List[str] = []
+        reject_reasons: List[str] = []
 
-        # --- Critère 1 : présence dominante de vert végétal (+ jaune/brun pour feuilles malades) ---
-        green_mask = ((hue >= 25) & (hue <= 90) & (sat > 28) & (val > 28)).astype(np.uint8)
-        yellow_mask = ((hue >= 12) & (hue <= 35) & (sat > 35) & (val > 45)).astype(np.uint8)
-        brown_mask = ((hue >= 4) & (hue <= 22) & (sat > 25) & (val > 20)).astype(np.uint8)
+        b_f = img[:, :, 0].astype(np.float32)
+        g_f = img[:, :, 1].astype(np.float32)
+        r_f = img[:, :, 2].astype(np.float32)
+
+        # ---------------------------------------------------------------
+        # Critère 1 : couverture végétale (vert + jaune + brun pour malades)
+        # ---------------------------------------------------------------
+        green_mask = ((hue >= 25) & (hue <= 90) & (sat > 30) & (val > 30)).astype(np.uint8)
+        yellow_mask = ((hue >= 12) & (hue <= 35) & (sat > 35) & (val > 50)).astype(np.uint8)
+        brown_mask = ((hue >= 4) & (hue <= 22) & (sat > 28) & (val > 22)).astype(np.uint8)
         veg_mask = np.clip(
                 green_mask.astype(np.uint16) + yellow_mask.astype(np.uint16) + brown_mask.astype(np.uint16),
                 0, 1,
         ).astype(np.uint8)
         pct_veg = 100.0 * float(np.count_nonzero(veg_mask)) / total_pixels
+        pct_green_only = 100.0 * float(np.count_nonzero(green_mask)) / total_pixels
 
-        if pct_veg >= 20.0:
+        if pct_veg >= 30.0:
                 score += 40
-                reasons.append(f"végétation détectée ({pct_veg:.0f}%)")
-        elif pct_veg >= 10.0:
-                score += 22
-                reasons.append(f"végétation partielle ({pct_veg:.0f}%)")
+                reasons.append(f"végétation dominante ({pct_veg:.0f}%)")
+        elif pct_veg >= 18.0:
+                score += 25
+                reasons.append(f"végétation présente ({pct_veg:.0f}%)")
+        elif pct_veg >= 8.0:
+                score += 12
+                reasons.append(f"végétation faible ({pct_veg:.0f}%)")
         else:
-                reasons.append(f"peu de couleurs végétales ({pct_veg:.0f}%)")
+                reject_reasons.append(f"couleurs végétales insuffisantes ({pct_veg:.0f}%)")
 
-        # --- Critère 2 : Indice Excess Green (ExG) ---
-        b_f = img[:, :, 0].astype(np.float32)
-        g_f = img[:, :, 1].astype(np.float32)
-        r_f = img[:, :, 2].astype(np.float32)
+        # ---------------------------------------------------------------
+        # Critère 2 : Indice ExG (Excess Green Index) — obligatoire positif
+        # ---------------------------------------------------------------
         exg = 2.0 * g_f - r_f - b_f
-        pct_exg = 100.0 * float(np.count_nonzero(exg > 5)) / total_pixels
-        if pct_exg >= 15.0:
-                score += 20
-                reasons.append(f"indice ExG végétal ({pct_exg:.0f}%)")
-        elif pct_exg >= 7.0:
-                score += 10
+        mean_exg = float(np.mean(exg))
+        pct_exg_pos = 100.0 * float(np.count_nonzero(exg > 8)) / total_pixels
 
-        # --- Critère 3 : forme organique (contour non artificiel) ---
+        if mean_exg > 0 and pct_exg_pos >= 20.0:
+                score += 28
+                reasons.append(f"ExG positif ({pct_exg_pos:.0f}% pixels, moy={mean_exg:.1f})")
+        elif mean_exg > 0 and pct_exg_pos >= 10.0:
+                score += 18
+                reasons.append(f"ExG partiel ({pct_exg_pos:.0f}%)")
+        elif mean_exg > 0 and pct_exg_pos >= 4.0:
+                score += 8
+        else:
+                reject_reasons.append(f"indice ExG non végétal (moy={mean_exg:.1f})")
+
+        # ---------------------------------------------------------------
+        # Critère 3 : forme organique (non-géométrique)
+        # ---------------------------------------------------------------
         blurred = cv2.GaussianBlur(gray, (9, 9), 0)
         _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         contours_v, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        organic_score = 0
         if contours_v:
                 largest_v = max(contours_v, key=cv2.contourArea)
                 c_area = float(cv2.contourArea(largest_v))
@@ -860,47 +887,233 @@ def validate_leaf_image(image: object) -> Dict[str, object]:
                         hull_area_v = float(cv2.contourArea(hull_v))
                         solidity_v = c_area / hull_area_v if hull_area_v > 0 else 0.0
                         compactness_v = (4.0 * np.pi * c_area) / (c_perim ** 2)
-                        if 0.50 <= solidity_v <= 0.98 and 0.06 <= compactness_v <= 0.90:
-                                score += 25
-                                reasons.append(f"forme organique (solidité={solidity_v:.2f})")
-                        elif coverage >= 0.06:
-                                score += 12
-                                reasons.append("objet organique identifié")
+                        # Feuilles réelles : solidity 0.45-0.97, compactness 0.03-0.88
+                        # Formes géométriques parfaites : compactness proche de 1.0 ou solidity > 0.99
+                        if compactness_v > 0.92 and solidity_v > 0.97:
+                                # Rectangle / cercle parfait = artificiel
+                                organic_score = 0
+                                reject_reasons.append(f"forme géométrique parfaite (compacité={compactness_v:.2f})")
+                        elif 0.45 <= solidity_v <= 0.98 and 0.03 <= compactness_v <= 0.88:
+                                organic_score = 20
+                                reasons.append(f"forme organique (solidité={solidity_v:.2f}, compacité={compactness_v:.2f})")
+                        elif coverage >= 0.06 and solidity_v > 0.40:
+                                organic_score = 10
+                                reasons.append("objet organique partiel")
+                score += organic_score
 
-        # --- Critère 4 : texture naturelle (variance du Laplacien) ---
+        # ---------------------------------------------------------------
+        # Critère 4 : texture naturelle (nervures, rugosité biologique)
+        # ---------------------------------------------------------------
         lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-        if lap_var >= 80.0:
-                score += 10
-                reasons.append("texture naturelle détectée")
+        # Détection de nervures via top-hat morphologique (canal vert)
+        green_ch = img[:, :, 1]
+        tophat_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+        tophat = cv2.morphologyEx(green_ch, cv2.MORPH_TOPHAT, tophat_kernel)
+        _, vein_mask_v = cv2.threshold(tophat, 12, 255, cv2.THRESH_BINARY)
+        pct_veins = 100.0 * float(np.count_nonzero(vein_mask_v)) / total_pixels
+
+        if lap_var >= 80.0 and pct_veins >= 3.0:
+                score += 12
+                reasons.append(f"texture biologique (Lap={lap_var:.0f}, nervures={pct_veins:.0f}%)")
+        elif lap_var >= 40.0:
+                score += 6
+                reasons.append(f"texture naturelle (Lap={lap_var:.0f})")
         elif lap_var < 15.0:
-                score -= 8
-                reasons.append("image trop lisse/uniforme")
+                score -= 10
+                reject_reasons.append("surface trop uniforme/lisse (artificielle)")
 
-        # --- Critère 5 : teinte dominante non artificielle ---
-        valid_px = sat > 15
-        if float(np.count_nonzero(valid_px)) > total_pixels * 0.15:
-                hues_valid = hue[valid_px]
-                dom_hue = int(np.argmax(np.bincount(hues_valid.astype(np.int32), minlength=180)))
-                # Bleu pur (ciel/fond artificiel) et rouge vif (objet non végétal)
-                if (100 <= dom_hue <= 130) and pct_veg < 10.0:
-                        score -= 15
-                        reasons.append("fond bleu/artificiel probable")
-                elif (dom_hue < 4 or dom_hue > 165) and pct_veg < 10.0:
-                        score -= 10
-                        reasons.append("teinte non végétale dominante")
+        # ---------------------------------------------------------------
+        # Critère 5 : rejet fond artificiel dominant
+        # ---------------------------------------------------------------
+        # Fond gris/blanc uniforme (mur, asphalte, papier)
+        gray_mask = ((sat < 25) & (val > 40)).astype(np.uint8)
+        pct_gray = 100.0 * float(np.count_nonzero(gray_mask)) / total_pixels
+        if pct_gray > 65.0 and pct_veg < 15.0:
+                score -= 20
+                reject_reasons.append(f"fond uniforme gris/blanc ({pct_gray:.0f}%)")
 
+        # Fond bleu artificiel (ciel, tissu)
+        blue_mask = ((hue >= 95) & (hue <= 135) & (sat > 40) & (val > 50)).astype(np.uint8)
+        pct_blue = 100.0 * float(np.count_nonzero(blue_mask)) / total_pixels
+        if pct_blue > 40.0 and pct_veg < 15.0:
+                score -= 20
+                reject_reasons.append(f"fond bleu artificiel ({pct_blue:.0f}%)")
+
+        # Teinte peau humaine dominante (main, visage) — hue 2-18, sat modérée
+        skin_mask = ((hue >= 2) & (hue <= 18) & (sat > 28) & (sat < 160) & (val > 60)).astype(np.uint8)
+        pct_skin = 100.0 * float(np.count_nonzero(skin_mask)) / total_pixels
+        if pct_skin > 35.0 and pct_veg < 15.0:
+                score -= 18
+                reject_reasons.append(f"teinte peau humaine dominante ({pct_skin:.0f}%)")
+
+        # ---------------------------------------------------------------
+        # Critère 6 : rejet formes géométriques (détection de lignes droites)
+        # ---------------------------------------------------------------
+        edges = cv2.Canny(gray, 50, 150)
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=60, minLineLength=int(min(h, w) * 0.25), maxLineGap=10)
+        n_straight_lines = len(lines) if lines is not None else 0
+        if n_straight_lines >= 6 and pct_veg < 20.0:
+                score -= 15
+                reject_reasons.append(f"structure géométrique linéaire ({n_straight_lines} lignes droites)")
+
+        # ---------------------------------------------------------------
+        # Score final et décision
+        # ---------------------------------------------------------------
         confidence = min(100, max(0, score))
-        is_leaf = confidence >= 40
+        is_leaf = confidence >= 70
 
         if is_leaf:
                 primary_reason = reasons[0] if reasons else "végétation confirmée"
         else:
+                all_reasons = reject_reasons + [r for r in reasons if "insuffisant" in r or "faible" in r]
                 primary_reason = (
-                        "Image invalide — " + "; ".join(reasons[:2])
-                        if reasons else "Aucune feuille détectée"
+                        "Image rejetée — " + "; ".join(all_reasons[:2])
+                        if all_reasons else "Aucune feuille détectée"
                 )
 
         return {"is_leaf": is_leaf, "confidence": confidence, "reason": primary_reason}
+
+
+def validate_plant_match(analysis: Dict, plant_type: str) -> Dict[str, object]:
+        """Vérifie la cohérence morphologique entre l'image analysée et le type de plante choisi.
+
+        Utilise les caractéristiques de forme extraites par analyze_leaf :
+        - leaf_aspect_ratio, leaf_compactness, leaf_shape, percent_leaf_area
+
+        Retourne:
+                {
+                        "plant_match": True/False,
+                        "confidence": 0-100,
+                        "reason": "..."
+                }
+        """
+        if not plant_type:
+                return {"plant_match": True, "confidence": 100, "reason": "type de plante non précisé"}
+
+        # Profils morphologiques par type de plante
+        # aspect_ratio = rapport largeur/hauteur de la bounding box
+        # compactness = aire feuille / aire bounding box (0=très étiré, 1=compact/rond)
+        profiles: Dict[str, Dict] = {
+                "maïs": {
+                        "shapes": ["feuille longue", "feuille fine"],
+                        "ar_min": 0.08, "ar_max": 0.65,     # feuille très longue → bounding box étroite
+                        "comp_min": 0.20, "comp_max": 0.82,
+                        "description": "feuille longue et étroite",
+                },
+                "riz": {
+                        "shapes": ["feuille longue", "feuille fine"],
+                        "ar_min": 0.06, "ar_max": 0.70,
+                        "comp_min": 0.18, "comp_max": 0.80,
+                        "description": "feuille fine et allongée",
+                },
+                "blé": {
+                        "shapes": ["feuille longue", "feuille fine"],
+                        "ar_min": 0.05, "ar_max": 0.55,
+                        "comp_min": 0.15, "comp_max": 0.78,
+                        "description": "feuille très fine et longue",
+                },
+                "sorgho": {
+                        "shapes": ["feuille longue", "feuille fine"],
+                        "ar_min": 0.07, "ar_max": 0.65,
+                        "comp_min": 0.18, "comp_max": 0.82,
+                        "description": "feuille longue type graminée",
+                },
+                "mil": {
+                        "shapes": ["feuille longue", "feuille fine"],
+                        "ar_min": 0.06, "ar_max": 0.60,
+                        "comp_min": 0.15, "comp_max": 0.80,
+                        "description": "feuille fine et allongée",
+                },
+                "tomate": {
+                        "shapes": ["feuille large", "feuille fine"],
+                        "ar_min": 0.50, "ar_max": 2.20,
+                        "comp_min": 0.40, "comp_max": 0.95,
+                        "description": "feuille large et composée",
+                },
+                "manioc": {
+                        "shapes": ["feuille large", "feuille fine"],
+                        "ar_min": 0.45, "ar_max": 2.00,
+                        "comp_min": 0.28, "comp_max": 0.88,
+                        "description": "feuille palmée aux lobes digitiformes",
+                },
+                "arachide": {
+                        "shapes": ["feuille large", "feuille fine"],
+                        "ar_min": 0.55, "ar_max": 1.90,
+                        "comp_min": 0.50, "comp_max": 0.95,
+                        "description": "petite feuille ovale de légumineuse",
+                },
+                "coton": {
+                        "shapes": ["feuille large", "feuille fine"],
+                        "ar_min": 0.45, "ar_max": 2.10,
+                        "comp_min": 0.28, "comp_max": 0.88,
+                        "description": "feuille large lobée",
+                },
+        }
+
+        profile = profiles.get(plant_type)
+        if profile is None:
+                return {"plant_match": True, "confidence": 80, "reason": f"profil inconnu pour '{plant_type}'"}
+
+        ar = float(analysis.get("leaf_aspect_ratio") or analysis.get("leaf_width_height_ratio") or 1.0)
+        comp = float(analysis.get("leaf_compactness") or 0.5)
+        shape = (analysis.get("leaf_shape") or "").lower()
+        pct_leaf = float(analysis.get("percent_leaf_area") or 0.0)
+
+        match_score = 0
+        reasons_ok: List[str] = []
+        reasons_ko: List[str] = []
+
+        # -- Forme attendue --
+        shape_ok = any(s in shape for s in profile["shapes"])
+        if shape_ok:
+                match_score += 40
+                reasons_ok.append(f"forme compatible ({shape})")
+        else:
+                reasons_ko.append(f"forme incompatible : attendu '{profile['description']}', détecté '{shape}'")
+
+        # -- Aspect ratio --
+        ar_ok = profile["ar_min"] <= ar <= profile["ar_max"]
+        if ar_ok:
+                match_score += 35
+                reasons_ok.append(f"ratio longueur/largeur compatible ({ar:.2f})")
+        else:
+                # Tolérance : pénalité progressive selon l'écart
+                distance = min(abs(ar - profile["ar_min"]), abs(ar - profile["ar_max"]))
+                if distance <= 0.25:
+                        match_score += 15
+                        reasons_ok.append(f"ratio limite acceptable ({ar:.2f})")
+                else:
+                        reasons_ko.append(
+                                f"ratio incompatible ({ar:.2f}) — attendu [{profile['ar_min']:.2f}-{profile['ar_max']:.2f}]"
+                        )
+
+        # -- Compacité --
+        comp_ok = profile["comp_min"] <= comp <= profile["comp_max"]
+        if comp_ok:
+                match_score += 25
+                reasons_ok.append(f"compacité compatible ({comp:.2f})")
+        else:
+                distance_c = min(abs(comp - profile["comp_min"]), abs(comp - profile["comp_max"]))
+                if distance_c <= 0.15:
+                        match_score += 10
+
+        plant_match = match_score >= 55
+        confidence_match = min(100, match_score)
+
+        if plant_match:
+                reason = reasons_ok[0] if reasons_ok else "morphologie compatible"
+        else:
+                reason = reasons_ko[0] if reasons_ko else "morphologie incompatible avec la plante sélectionnée"
+
+        return {
+                "plant_match": plant_match,
+                "confidence": confidence_match,
+                "reason": reason,
+                "expected": profile["description"],
+                "detected_shape": shape,
+                "detected_ar": round(ar, 3),
+                "detected_compactness": round(comp, 3),
+        }
 
 
 def save_mask(mask: np.ndarray, path: str) -> None:

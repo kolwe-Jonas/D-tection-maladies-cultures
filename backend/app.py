@@ -11,7 +11,7 @@ import cv2
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
-from services.image_analysis import analyze_leaf, optimize_image_for_analysis, validate_leaf_image
+from services.image_analysis import analyze_leaf, optimize_image_for_analysis, validate_leaf_image, validate_plant_match
 from services.disease_detector import find_best_match
 
 
@@ -148,22 +148,38 @@ def detect():
                 "details": str(e)
             }), 500
 
-        # ===== VALIDATION FEUILLE =====
+        # ===== VALIDATION FEUILLE (BLOQUANTE — seuil strict 70) =====
         try:
             leaf_check = validate_leaf_image(image)
-            logger.info(f"   🌿 Validation feuille: is_leaf={leaf_check['is_leaf']} confidence={leaf_check['confidence']} reason={leaf_check['reason']}")
-            if not leaf_check["is_leaf"]:
+            logger.info(
+                f"   🌿 Validation feuille: is_leaf={leaf_check['is_leaf']} "
+                f"confidence={leaf_check['confidence']} reason={leaf_check['reason']}"
+            )
+            leaf_rejected = (not leaf_check["is_leaf"]) or (int(leaf_check.get("confidence", 0)) < 70)
+            if leaf_rejected:
                 try:
                     os.remove(filepath)
-                except:
+                except Exception:
                     pass
+                logger.warning(f"   ❌ Image rejetée (non feuille) — confidence={leaf_check.get('confidence')}")
                 return jsonify({
                     "success": False,
-                    "error": "Image invalide. Veuillez photographier une feuille de plante clairement visible.",
-                    "leaf_validation": leaf_check
+                    "is_leaf": False,
+                    "error": "❌ Image invalide : veuillez envoyer uniquement une feuille de plante.",
+                    "confidence": leaf_check.get("confidence", 0),
+                    "reason": leaf_check.get("reason", ""),
                 }), 400
         except Exception as e:
-            logger.warning(f"   ⚠️ Validation feuille échouée (non bloquante): {str(e)}")
+            logger.error(f"   ❌ Validation feuille — erreur inattendue: {str(e)}", exc_info=True)
+            try:
+                os.remove(filepath)
+            except Exception:
+                pass
+            return jsonify({
+                "success": False,
+                "error": "❌ Image invalide : veuillez envoyer uniquement une feuille de plante.",
+                "details": str(e),
+            }), 400
 
         plant_type_raw = request.form.get('plant_type', '').strip().lower()
         plant_type_map = {
@@ -220,6 +236,33 @@ def detect():
                 "error": "Erreur lors de la détection de la maladie",
                 "details": str(e)
             }), 500
+
+        # ===== VALIDATION COHÉRENCE PLANTE (BLOQUANTE) =====
+        if plant_type:
+            try:
+                plant_check = validate_plant_match(analysis, plant_type)
+                logger.info(
+                    f"   🌱 Validation plante: match={plant_check['plant_match']} "
+                    f"confidence={plant_check['confidence']} reason={plant_check['reason']}"
+                )
+                if not plant_check["plant_match"]:
+                    try:
+                        os.remove(filepath)
+                    except Exception:
+                        pass
+                    logger.warning(f"   ❌ Incohérence plante '{plant_type}' — {plant_check.get('reason')}")
+                    return jsonify({
+                        "success": False,
+                        "is_leaf": True,
+                        "plant_match": False,
+                        "error": "❌ L'image ne correspond pas au type de plante sélectionné.",
+                        "expected": plant_check.get("expected", ""),
+                        "detected_shape": plant_check.get("detected_shape", ""),
+                        "confidence": plant_check.get("confidence", 0),
+                        "reason": plant_check.get("reason", ""),
+                    }), 400
+            except Exception as e:
+                logger.warning(f"   ⚠️ Validation plante échouée (non bloquante): {str(e)}")
 
         logger.info("   ✅ Analyse complète - Préparation de la réponse JSON")
 
