@@ -1,0 +1,219 @@
+Améliore fortement le système d’analyse des maladies des cultures SANS casser le projet existant.
+
+IMPORTANT :
+
+* Ne pas modifier le design actuel
+* Ne pas modifier l’arborescence
+* Ne pas supprimer des fonctionnalités existantes
+* Ne pas toucher au style CSS principal
+* Ne pas changer les routes Flask
+* Garder la logique actuelle compatible avec Render/Replit
+
+OBJECTIFS PRINCIPAUX :
+
+1. Empêcher l’analyse d’images qui ne sont PAS des feuilles/plantes
+2. Corriger les images caméra trop lourdes (“mémoire insuffisante”)
+3. Rendre la reconnaissance des maladies beaucoup plus intelligente et précise
+4. Garder le système actuel stable
+
+==================================================
+PARTIE 1 — VALIDATION INTELLIGENTE D’UNE FEUILLE
+================================================
+
+Fichier :
+backend/services/image_analysis.py
+
+Ajouter une vraie validation de feuille avant analyse.
+
+Le système doit vérifier :
+
+* présence dominante de vert végétal
+* contours ressemblant à une feuille
+* texture végétale
+* forme organique
+* ratio feuille/fond
+* nervures visibles
+* absence de visages/objets simples
+* absence de fonds totalement non naturels
+
+Créer une fonction robuste :
+
+validate_leaf_image(image)
+
+Retour attendu :
+
+{
+"is_leaf": True/False,
+"confidence": 0-100,
+"reason": "..."
+}
+
+SI l’image ne ressemble pas suffisamment à une feuille :
+retourner une erreur propre :
+
+{
+"success": false,
+"error": "Image invalide. Veuillez photographier une feuille de plante clairement visible."
+}
+
+IMPORTANT :
+
+* ne jamais analyser une voiture, un visage, un mur, une table, etc.
+* éviter les faux positifs
+* ne pas casser analyze_leaf()
+
+==================================================
+PARTIE 2 — CORRECTION MÉMOIRE INSUFFISANTE
+==========================================
+
+Les photos caméra téléphone sont trop lourdes.
+
+Avant analyse :
+
+* redimensionner automatiquement
+* compresser intelligemment
+* conserver les détails des maladies
+* limiter largeur max à 1024px
+* utiliser OpenCV pour optimisation mémoire
+* éviter crash RAM
+
+Ajouter une fonction robuste :
+
+optimize_image_for_analysis()
+
+Fonctions attendues :
+
+* resize intelligent
+* compression contrôlée
+* réduction bruit
+* conservation des taches/motifs
+
+Le système doit accepter :
+
+* photos téléphone
+* photos caméra HD
+* images volumineuses
+
+Sans erreur :
+“Impossible de charger l’image / mémoire insuffisante”
+
+==================================================
+PARTIE 3 — AMÉLIORATION FORTE DE LA RECONNAISSANCE
+==================================================
+
+Améliorer le moteur actuel dans :
+
+backend/services/disease_detector.py
+backend/services/image_analysis.py
+
+SANS supprimer le système existant.
+
+Le système doit devenir beaucoup plus précis sur :
+
+* couleur exacte des taches
+* contours des lésions
+* texture feuille
+* distribution spatiale
+* nervures
+* trous
+* jaunissement
+* mosaïque
+* bords brûlés
+* humidité
+* champignons
+* densité des taches
+* symétrie
+* centre/bord feuille
+* taille réelle des lésions
+* pourcentage malade
+
+Ajouter :
+
+* pondération intelligente
+* analyse multi-zones
+* score de cohérence
+* filtrage des incohérences
+
+Réduire fortement les confusions entre :
+
+* chlorose
+* mosaïque
+* cercosporiose
+* alternariose
+* rouille
+* brûlure bactérienne
+* carence
+
+IMPORTANT :
+
+* garder la structure actuelle
+* ne pas supprimer les scores existants
+* améliorer seulement la logique
+
+==================================================
+PARTIE 4 — ANALYSE PLUS PROFESSIONNELLE
+=======================================
+
+Améliorer les réponses finales.
+
+Les causes doivent être :
+
+* agricoles
+* réalistes
+* détaillées
+
+Les traitements :
+
+* naturels
+* chimiques
+* prévention
+* conseils terrain
+
+Ajouter :
+
+* niveau de gravité
+* urgence
+* risque propagation
+
+Format attendu :
+
+{
+disease_name,
+confidence,
+severity,
+urgency,
+symptoms,
+causes,
+treatments,
+prevention
+}
+
+==================================================
+PARTIE 5 — STABILITÉ
+====================
+
+NE PAS :
+
+* casser Flask
+* casser Render
+* casser Replit
+* casser app.js
+* casser index.html
+* modifier le design
+* modifier les routes
+* modifier les endpoints API
+
+Le projet doit continuer à fonctionner immédiatement après mise à jour.
+
+==================================================
+PARTIE 6 — À LA FIN
+===================
+
+Afficher un résumé clair :
+
+* améliorations ajoutées
+* fichiers modifiés
+* validation feuille ajoutée
+* optimisation mémoire ajoutée
+* précision améliorée
+* compatibilité conservée

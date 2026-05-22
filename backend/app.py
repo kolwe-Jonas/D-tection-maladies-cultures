@@ -11,7 +11,7 @@ import cv2
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
-from services.image_analysis import analyze_leaf
+from services.image_analysis import analyze_leaf, optimize_image_for_analysis, validate_leaf_image
 from services.disease_detector import find_best_match
 
 
@@ -115,7 +115,7 @@ def detect():
             
             if image is None:
                 logger.error(f"   ❌ cv2.imread a retourné None")
-                os.remove(filepath)  # Nettoyer le fichier invalide
+                os.remove(filepath)
                 return jsonify({
                     "error": "Image invalide ou corrompue",
                     "details": "Impossible de lire l'image avec OpenCV"
@@ -132,6 +132,38 @@ def detect():
                 "error": "Erreur lors du chargement de l'image",
                 "details": str(e)
             }), 500
+
+        # ===== OPTIMISATION MÉMOIRE (resize + débruitage) =====
+        try:
+            image = optimize_image_for_analysis(image, max_dim=1024)
+            logger.info(f"   ✓ Image optimisée: shape={image.shape}")
+        except Exception as e:
+            logger.error(f"   ❌ Erreur optimisation image: {str(e)}")
+            try:
+                os.remove(filepath)
+            except:
+                pass
+            return jsonify({
+                "error": "Erreur lors de l'optimisation de l'image",
+                "details": str(e)
+            }), 500
+
+        # ===== VALIDATION FEUILLE =====
+        try:
+            leaf_check = validate_leaf_image(image)
+            logger.info(f"   🌿 Validation feuille: is_leaf={leaf_check['is_leaf']} confidence={leaf_check['confidence']} reason={leaf_check['reason']}")
+            if not leaf_check["is_leaf"]:
+                try:
+                    os.remove(filepath)
+                except:
+                    pass
+                return jsonify({
+                    "success": False,
+                    "error": "Image invalide. Veuillez photographier une feuille de plante clairement visible.",
+                    "leaf_validation": leaf_check
+                }), 400
+        except Exception as e:
+            logger.warning(f"   ⚠️ Validation feuille échouée (non bloquante): {str(e)}")
 
         plant_type_raw = request.form.get('plant_type', '').strip().lower()
         plant_type_map = {
