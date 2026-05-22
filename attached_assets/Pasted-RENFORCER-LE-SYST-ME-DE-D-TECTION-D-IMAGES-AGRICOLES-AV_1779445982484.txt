@@ -1,0 +1,135 @@
+RENFORCER LE SYSTÈME DE DÉTECTION D’IMAGES AGRICOLES AVEC UNE APPROCHE MULTI-COMPOSANTES (COULEUR + FORME + TEXTURE) ET VERROUILLAGE STRICT
+
+OBJECTIF GLOBAL :
+Créer un système capable de rejeter 100% des images non végétales (habits, humains, objets, murs, arrière-plans) et n’analyser UNIQUEMENT les vraies feuilles de plantes.
+
+==================================================
+
+1. RÈGLE ABSOLUE DU SYSTÈME
+   ==================================================
+
+Aucune analyse maladie ne doit être effectuée si l’image n’est pas validée comme feuille.
+
+SI doute → REFUS IMMÉDIAT
+
+==================================================
+2. PIPELINE OBLIGATOIRE (STRICT)
+================================
+
+Dans backend/app.py → /detect :
+
+ÉTAPES :
+
+1. validate_leaf_image(image)
+
+2. SI échec :
+   → STOP COMPLET
+   → retour JSON erreur
+   → aucune analyse
+
+3. SI succès :
+   → analyse maladie
+
+==================================================
+3. NOUVELLE VALIDATION INTELLIGENTE MULTI-CRITÈRES
+==================================================
+
+Dans image_analysis.py :
+
+validate_leaf_image doit utiliser 3 couches :
+
+---
+
+## A. COULEUR VÉGÉTALE (ANTI ERREUR HABITS)
+
+* analyse HSV uniquement comme indicateur secondaire
+* green ratio obligatoire MAIS pas suffisant
+* ExG index positif obligatoire
+
+IMPORTANT :
+Ne jamais valider uniquement sur couleur
+(car vêtements verts = faux positifs)
+
+---
+
+## B. FORME BIOLOGIQUE (CRITIQUE)
+
+* contour irrégulier = feuille
+
+* rejet formes :
+
+  * rectangles (écrans, papiers)
+  * cercles parfaits
+  * silhouettes humaines
+  * objets artificiels
+
+* solidity entre 0.6 et 0.9 attendu pour feuille
+
+---
+
+## C. TEXTURE NATURELLE (ULTRA IMPORTANT)
+
+* détection nervures (variance locale)
+* surface non uniforme obligatoire
+* rejet surfaces plates (mur, tissu, peau)
+
+==================================================
+4. SYSTÈME DE SCORE FINAL (IMPORTANT)
+=====================================
+
+Calculer un score global :
+
+leaf_score = (
+color_score * 0.3 +
+shape_score * 0.4 +
+texture_score * 0.3
+)
+
+RÈGLE :
+
+SI leaf_score < 0.99 → REFUSER
+
+==================================================
+5. CAS À REJETER IMPÉRATIVEMENT
+===============================
+
+* vêtements (même verts)
+* mains humaines
+* visages
+* murs / sols
+* arbres en arrière-plan
+* objets flous
+* images mixtes non centrées feuille
+
+==================================================
+6. CAS ACCEPTÉS
+===============
+
+* feuille de plante visible clairement
+* feuille malade ou saine
+* feuille bien centrée dans l’image
+
+==================================================
+7. RÈGLE D’OR (TRÈS IMPORTANT)
+==============================
+
+👉 Le système doit préférer REJETER une vraie feuille plutôt que valider une mauvaise image.
+
+(Principe : zéro faux positifs, même si faux négatifs augmentent légèrement)
+
+==================================================
+8. MESSAGE UTILISATEUR
+
+"❌ Aucune feuille de plante détectée. Veuillez prendre une photo claire d’une feuille centrée."
+
+==================================================
+RÉSULTAT FINAL
+
+✔ vêtements rejetés
+✔ humains rejetés
+✔ objets rejetés
+✔ arrière-plans rejetés
+✔ feuilles valides acceptées uniquement
+
+SYSTÈME FINAL :
+IA agricole robuste, fiable, niveau production réelle

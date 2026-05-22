@@ -155,18 +155,25 @@ def detect():
                 f"   🌿 Validation feuille: is_leaf={leaf_check['is_leaf']} "
                 f"confidence={leaf_check['confidence']} reason={leaf_check['reason']}"
             )
-            leaf_rejected = (not leaf_check["is_leaf"]) or (int(leaf_check.get("confidence", 0)) < 70)
-            if leaf_rejected:
+            if not leaf_check["is_leaf"]:
                 try:
                     os.remove(filepath)
                 except Exception:
                     pass
-                logger.warning(f"   ❌ Image rejetée (non feuille) — confidence={leaf_check.get('confidence')}")
+                logger.warning(
+                    f"   ❌ Image rejetée — leaf_score={leaf_check.get('leaf_score', 0):.3f} "
+                    f"(color={leaf_check.get('color_score', 0):.2f}, "
+                    f"shape={leaf_check.get('shape_score', 0):.2f}, "
+                    f"texture={leaf_check.get('texture_score', 0):.2f})"
+                )
                 return jsonify({
                     "success": False,
                     "is_leaf": False,
-                    "error": "❌ Image invalide : veuillez envoyer uniquement une feuille de plante.",
-                    "confidence": leaf_check.get("confidence", 0),
+                    "error": "❌ Aucune feuille de plante détectée. Veuillez prendre une photo claire d'une feuille centrée.",
+                    "leaf_score": leaf_check.get("leaf_score", 0),
+                    "color_score": leaf_check.get("color_score", 0),
+                    "shape_score": leaf_check.get("shape_score", 0),
+                    "texture_score": leaf_check.get("texture_score", 0),
                     "reason": leaf_check.get("reason", ""),
                 }), 400
         except Exception as e:
@@ -177,7 +184,7 @@ def detect():
                 pass
             return jsonify({
                 "success": False,
-                "error": "❌ Image invalide : veuillez envoyer uniquement une feuille de plante.",
+                "error": "❌ Aucune feuille de plante détectée. Veuillez prendre une photo claire d'une feuille centrée.",
                 "details": str(e),
             }), 400
 
