@@ -307,6 +307,10 @@ function showError(message) {
     }
 }
 
+function hideError() {
+    showError('');
+}
+
 // Initialisation
 if (loadingState) loadingState.classList.add('hidden');
 if (resultCard) resultCard.classList.add('hidden');
