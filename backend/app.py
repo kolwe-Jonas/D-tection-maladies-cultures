@@ -236,16 +236,26 @@ def detect():
                     "reason": leaf_check.get("reason", ""),
                 }), 400
 
-            # ── GATE STRICT NON_PLANTE : plant_confidence < 0.75 sans signaux agricoles ──
-            # Un objet avec quelques couleurs brownish peut passer is_leaf=True mais
-            # avoir un score trop faible pour être une vraie plante.
-            # Le seuil 0.75 est appliqué SAUF si des signaux agricoles clairs compensent.
+            # ── GATE STRICT NON_PLANTE : plant_confidence < 0.75 ──────────────────
+            # Un objet avec couleurs orange/brunes peut passer is_leaf=True car ses
+            # couleurs ressemblent à des signaux de maladie (disease_pattern ≥ 25).
+            # Pour distinguer un VRAI végétal malade d'un objet coloré, on exige
+            # CUMULATIVEMENT :  disease_pattern ≥ 25  ET  vegetation_score ≥ 5 %
+            # (présence réelle de pixels verts → structure biologique).
+            # Un objet orange aura vegetation_score ≈ 0–2 % → toujours bloqué.
             plant_confidence_score = round(leaf_check.get("leaf_score", 0.0) / 100.0, 3)
             disease_pattern_val    = leaf_check.get("disease_pattern_score", 0.0)
+            vegetation_score_val   = float(leaf_check.get("vegetation_score", 0.0))
             print(f"Plant detected: {leaf_check.get('is_leaf', False)}")
             print(f"Plant confidence: {plant_confidence_score:.3f}")
+            print(f"Pipeline status: vegetation={vegetation_score_val:.1f}% "
+                  f"disease_pattern={disease_pattern_val:.1f} "
+                  f"leaf_score={leaf_check.get('leaf_score', 0):.1f}")
 
-            if plant_confidence_score < 0.75 and disease_pattern_val < 25.0:
+            # Exemption UNIQUEMENT si signaux agricoles ET végétation réelle présents
+            _exemption_ok = (disease_pattern_val >= 25.0 and vegetation_score_val >= 5.0)
+
+            if plant_confidence_score < 0.75 and not _exemption_ok:
                 try:
                     os.remove(filepath)
                 except Exception:

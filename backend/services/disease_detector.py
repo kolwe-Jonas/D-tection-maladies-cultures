@@ -1054,9 +1054,10 @@ def _verify_rust_signals(features: Dict) -> bool:
         leaf_score      = float(features.get("_leaf_score", 100.0))
 
         # 1. Score plante trop bas → image non végétale → rouille impossible
-        if plant_conf < 0.30 or leaf_score < 30.0:
+        # Seuil relevé à 0.45 / 45.0 : les objets colorés (conf=0.40–0.65) sont bloqués.
+        if plant_conf < 0.45 or leaf_score < 45.0:
                 logger.warning(
-                        "RUST GUARD: score plante trop bas (conf=%.2f, leaf=%.1f) — rouille bloquée",
+                        "RUST GUARD: score plante insuffisant (conf=%.2f, leaf=%.1f) — rouille bloquée",
                         plant_conf, leaf_score,
                 )
                 return False
@@ -1163,7 +1164,9 @@ def find_best_match(
                 top_disease, top_score, top_detail = scored[0]
                 if top_detail.get("pattern") == "rust":
                         if not _verify_rust_signals(features):
-                                penalized_score = top_score * 0.40
+                                # Pénalité forte : ×0.20 pour tomber sous le seuil AUCUNE_MALADIE (35 %).
+                                # Ex : score brut 90 % → 18 % → AUCUNE_MALADIE retourné.
+                                penalized_score = top_score * 0.20
                                 logger.warning(
                                         "RUST GUARD: rouille pénalisée (%.1f%% → %.1f%%) — "
                                         "signaux biologiques insuffisants",
@@ -1177,14 +1180,17 @@ def find_best_match(
         # aucune maladie ne doit être retournée avec confiance élevée.
         plant_conf_score = float(features.get("_plant_confidence_score", 1.0))
         leaf_sc = float(features.get("_leaf_score", 100.0))
-        if plant_conf_score < 0.30 or leaf_sc < 30.0:
+        # Seuil relevé à 0.45/45.0 et cap abaissé à 0.28 :
+        # tout objet qui passe (plant_conf 0.30–0.44) sera plafonné sous le seuil
+        # AUCUNE_MALADIE (35 %), donc aucune maladie ne sera retournée.
+        if plant_conf_score < 0.45 or leaf_sc < 45.0:
                 logger.warning(
                         "NON-VEGETAL GUARD: image non végétale dans find_best_match "
-                        "(plant_conf=%.2f, leaf_score=%.1f) — confiance plafonnée à 50%%",
+                        "(plant_conf=%.2f, leaf_score=%.1f) — confiance plafonnée à 28%%",
                         plant_conf_score, leaf_sc,
                 )
                 scored = [
-                        (d, min(s, 0.45), det)
+                        (d, min(s, 0.28), det)
                         for d, s, det in scored
                 ]
 
