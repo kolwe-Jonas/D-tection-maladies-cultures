@@ -1030,15 +1030,17 @@ def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict
                         "reason": str
                 }
         """
-        REJECT  = 40.0
         WARNING = 60.0
 
         def _empty(reason: str) -> Dict:
                 return {
-                        "is_leaf": False, "low_confidence_leaf": False,
+                        "is_leaf": False, "should_reject": True,
+                        "low_confidence_leaf": False,
                         "leaf_score": 0.0, "texture_score": 0.0, "shape_score": 0.0,
                         "color_score": 0.0, "contour_score": 0.0, "veg_percent": 0.0,
-                        "confidence": 0, "vein_score": 0.0, "reason": reason,
+                        "disease_pattern_score": 0.0, "vegetation_score": 0.0,
+                        "confidence": 0, "vein_score": 0.0,
+                        "symptom_details": {}, "reason": reason,
                 }
 
         try:
@@ -1217,10 +1219,9 @@ def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict
         )
 
         # ──────────────────────────────────────────────────────────────
-        # HARD REJECTS — signaux combines uniquement, jamais un seul
-        # Exception : si symptomes agricoles detectes, ne pas rejeter
-        # (une main avec une rouille dessus reste detectee — cas limite,
-        #  mais un vrai rejet imprevu est pire qu'un faux positif rare).
+        # DÉCISION DE REJET STRICT — seulement les cas évidement non-feuille
+        # Trois critères, chacun nécessite la COMBINAISON de plusieurs signaux
+        # ET l'absence de tout contenu biologique / agricole.
         # ──────────────────────────────────────────────────────────────
         skin_mask = (
                 (hue >= 2) & (hue <= 18) & (sat > 25) & (sat < 160) & (val > 60)
@@ -1228,58 +1229,64 @@ def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict
         pct_skin = 100.0 * float(np.count_nonzero(skin_mask)) / total_pixels
 
         hard_reject = None
-        disease_override = disease_pattern_score >= 40.0
 
-        if not disease_override:
-                if pct_skin > 60.0 and texture_score < 35.0 and pct_natural < 18.0:
-                        leaf_score  = min(leaf_score, 20.0)
-                        hard_reject = f"peau humaine ({pct_skin:.0f}%)"
-                elif is_fabric and fabric_uniform and texture_score < 42.0 and pct_natural < 22.0:
-                        leaf_score  = min(leaf_score, 22.0)
-                        hard_reject = f"vetement/tissu ({fabric_reason})"
-                elif lap_var < 3.0 and non_unif < 0.05:
-                        leaf_score  = min(leaf_score, 12.0)
-                        hard_reject = "image vide ou quasi uniforme"
-        else:
-                # Rejet minimal : image completement vide reste rejetee
-                if lap_var < 3.0 and non_unif < 0.05:
-                        leaf_score  = min(leaf_score, 12.0)
-                        hard_reject = "image vide ou quasi uniforme"
+        # 1. Image vide / couleur uniforme (vraiment rien à analyser)
+        if lap_var < 2.0 and non_unif < 0.03:
+                hard_reject = "image vide ou quasi uniforme"
+
+        # 2. Corps humain très dominant + aucun contenu agricole
+        elif pct_skin > 75.0 and disease_pattern_score < 15.0 and texture_score < 28.0:
+                hard_reject = f"peau humaine dominante ({pct_skin:.0f}%) sans contenu agricole"
+
+        # 3. Tissu/vêtement très confirmé + aucun contenu biologique
+        elif is_fabric and fabric_uniform and disease_pattern_score < 15.0 and veg_percent_broad < 6.0:
+                hard_reject = f"vetement/tissu artificiel ({fabric_reason}) sans contenu biologique"
+
+        if hard_reject:
+                leaf_score = min(leaf_score, 15.0)
 
         leaf_score = round(leaf_score, 2)
 
         # ──────────────────────────────────────────────────────────────
-        # DECISION FINALE
+        # DÉCISION FINALE
+        # should_reject  → vrai blocage HTTP 400 (image inutilisable)
+        # is_leaf        → indicateur de confiance (ne bloque plus seul)
+        # low_confidence → avertissement léger, analyse continue
         # ──────────────────────────────────────────────────────────────
-        is_leaf             = leaf_score >= REJECT
-        low_confidence_leaf = is_leaf and leaf_score < WARNING
+        should_reject       = hard_reject is not None
+        is_leaf             = leaf_score >= 40.0
+        low_confidence_leaf = not should_reject and not is_leaf
+        # Feuille probable si symptômes agricoles détectés même score bas
+        if disease_pattern_score >= 25.0 and not should_reject:
+                is_leaf = True
+                low_confidence_leaf = leaf_score < WARNING
 
-        if hard_reject:
+        if should_reject:
                 reason = f"Image rejetee — {hard_reject}"
         elif not is_leaf:
                 parts: List[str] = []
-                if texture_score < 25:         parts.append(f"texture non organique (Lap={lap_var:.0f})")
-                if shape_score   < 20:         parts.append(shape_note)
-                if disease_pattern_score < 15: parts.append(f"aucun symptome agricole detecte")
-                if not parts:                  parts.append(f"score global insuffisant ({leaf_score:.0f}/100)")
-                reason = "Image rejetee — " + "; ".join(parts)
+                if disease_pattern_score < 15: parts.append("aucun symptome agricole detecte")
+                if texture_score < 20:         parts.append(f"texture tres faible (Lap={lap_var:.0f})")
+                if not parts:                  parts.append(f"score global faible ({leaf_score:.0f}/100)")
+                reason = "Qualite limitee — " + "; ".join(parts)
         elif low_confidence_leaf:
-                reason = f"Feuille probable (confiance limitee) — {shape_note}"
+                reason = f"Feuille probable avec confiance limitee — {shape_note}"
         else:
                 reason = f"Feuille detectee — {shape_note}"
 
         # ── DEBUG LOGS ──
         print(
                 f"[LEAF VALIDATION] final_leaf_score={leaf_score:.1f}/100 "
-                f"texture_score={texture_score:.1f} shape_score={shape_score:.1f} "
-                f"color_score={color_score:.1f} disease_pattern_score={disease_pattern_score:.1f} "
-                f"vegetation_score={veg_percent_broad:.1f}% "
-                f"symptoms={symptom_details} "
-                f"is_leaf={is_leaf} reason='{reason}'"
+                f"texture={texture_score:.1f} shape={shape_score:.1f} "
+                f"color={color_score:.1f} disease_pattern={disease_pattern_score:.1f} "
+                f"vegetation={veg_percent_broad:.1f}% "
+                f"is_leaf={is_leaf} should_reject={should_reject} "
+                f"symptoms={symptom_details} reason='{reason}'"
         )
 
         return {
                 "is_leaf":                is_leaf,
+                "should_reject":          should_reject,
                 "low_confidence_leaf":    low_confidence_leaf,
                 "leaf_score":             leaf_score,
                 "confidence":             int(leaf_score),

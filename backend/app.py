@@ -168,82 +168,65 @@ def detect():
                 "plant_type_received": plant_type_raw
             }), 400
 
-        # ===== VALIDATION FEUILLE (score global 0-100, 4 critères pondérés) =====
-        # Règle : aucun critère seul ne rejette. Seul le score global décide.
-        #   < 40  → rejet (pas une feuille)
-        #   40-59 → feuille probable, analyse autorisée avec warning
-        #   ≥ 60  → feuille valide
+        # ===== VALIDATION FEUILLE =====
+        # Nouvelle stratégie : bloquer uniquement les images inutilisables.
+        # Tout ce qui contient un contenu biologique ou agricole passe.
+        #   should_reject=True  → HTTP 400 (image vide, peau pure, tissu pur)
+        #   is_leaf=False       → warning léger, analyse continue quand même
+        #   low_confidence      → avertissement, résultat peut être moins précis
+        leaf_warning = None
         try:
             leaf_check = validate_leaf_image(image, plant_type=plant_type)
             logger.info(
                 f"   🌿 Score feuille: {leaf_check.get('leaf_score', 0):.1f}/100 "
                 f"is_leaf={leaf_check['is_leaf']} "
+                f"should_reject={leaf_check.get('should_reject', False)} "
                 f"low_confidence={leaf_check.get('low_confidence_leaf', False)}"
             )
             logger.info(
-                f"   📊 texture_score={leaf_check.get('texture_score', 0):.1f} "
-                f"shape_score={leaf_check.get('shape_score', 0):.1f} "
-                f"color_score={leaf_check.get('color_score', 0):.1f} "
-                f"disease_pattern_score={leaf_check.get('disease_pattern_score', 0):.1f} "
-                f"vegetation_score={leaf_check.get('vegetation_score', 0):.1f}% "
-                f"veg_percent={leaf_check.get('veg_percent', 0):.1f}%"
+                f"   📊 texture={leaf_check.get('texture_score', 0):.1f} "
+                f"shape={leaf_check.get('shape_score', 0):.1f} "
+                f"color={leaf_check.get('color_score', 0):.1f} "
+                f"disease_pattern={leaf_check.get('disease_pattern_score', 0):.1f} "
+                f"vegetation={leaf_check.get('vegetation_score', 0):.1f}%"
             )
             logger.info(
                 f"   🔬 symptomes={leaf_check.get('symptom_details', {})}"
             )
-            if not leaf_check["is_leaf"]:
+
+            if leaf_check.get("should_reject", False):
+                # Vrai rejet : image totalement inutilisable (vide, peau pure, tissu pur)
                 try:
                     os.remove(filepath)
                 except Exception:
                     pass
                 logger.warning(
-                    f"   ❌ Image rejetée — score={leaf_check.get('leaf_score', 0):.1f}/100 "
-                    f"— {leaf_check.get('reason', '')}"
+                    f"   ❌ Image rejetée (should_reject) — {leaf_check.get('reason', '')}"
                 )
-                if plant_type == "manioc":
-                    error_msg = (
-                        "❌ Image invalide : aucune feuille de manioc clairement structurée détectée. "
-                        "Veuillez photographier une feuille complète avec ses lobes visibles."
-                    )
-                else:
-                    error_msg = "❌ Aucune feuille de plante détectée. Veuillez prendre une photo claire d'une feuille centrée."
                 return jsonify({
                     "success": False,
                     "is_leaf": False,
-                    "error": error_msg,
+                    "error": "❌ Image non analysable. Veuillez photographier une feuille de plante.",
                     "leaf_score": leaf_check.get("leaf_score", 0),
-                    "color_score": leaf_check.get("color_score", 0),
-                    "texture_score": leaf_check.get("texture_score", 0),
-                    "shape_score": leaf_check.get("shape_score", 0),
-                    "contour_score": leaf_check.get("contour_score", 0),
-                    "veg_percent": leaf_check.get("veg_percent", 0),
+                    "disease_pattern_score": leaf_check.get("disease_pattern_score", 0),
                     "reason": leaf_check.get("reason", ""),
                 }), 400
 
-            # Feuille probable (45 ≤ score < 65) — analyse autorisée avec avertissement
-            leaf_warning = None
-            if leaf_check.get("low_confidence_leaf"):
+            # Confiance limitée → warning mais analyse continue
+            if not leaf_check.get("is_leaf", True) or leaf_check.get("low_confidence_leaf", False):
                 leaf_warning = (
-                    "⚠️ Feuille détectée avec une confiance limitée "
-                    "(possible mauvaise lumière, flou ou feuille partiellement visible). "
+                    "⚠️ Image de qualité limitée — la feuille n'est pas clairement identifiée. "
                     "Le résultat peut être moins précis."
                 )
                 logger.info(
-                    f"   ⚠️ Feuille probable acceptée avec avertissement "
-                    f"(score={leaf_check.get('leaf_score', 0):.1f}/100)"
+                    f"   ⚠️ Qualité limitée — analyse continuée avec warning "
+                    f"(score={leaf_check.get('leaf_score', 0):.1f}/100, "
+                    f"disease={leaf_check.get('disease_pattern_score', 0):.1f})"
                 )
 
         except Exception as e:
-            logger.error(f"   ❌ Validation feuille — erreur inattendue: {str(e)}", exc_info=True)
-            try:
-                os.remove(filepath)
-            except Exception:
-                pass
-            return jsonify({
-                "success": False,
-                "error": "❌ Aucune feuille de plante détectée. Veuillez prendre une photo claire d'une feuille centrée.",
-                "details": str(e),
-            }), 400
+            logger.warning(f"   ⚠️ Validation feuille échouée — analyse continuée: {str(e)}")
+            leaf_warning = "⚠️ Validation de la feuille impossible — résultat peut être moins précis."
 
         # ===== ANALYSE DE L'IMAGE =====
         try:
@@ -291,21 +274,19 @@ def detect():
                     f"confidence={plant_check['confidence']} reason={plant_check['reason']}"
                 )
                 if not plant_check["plant_match"]:
-                    try:
-                        os.remove(filepath)
-                    except Exception:
-                        pass
-                    logger.warning(f"   ❌ Incohérence plante '{plant_type}' — {plant_check.get('reason')}")
-                    return jsonify({
-                        "success": False,
-                        "is_leaf": True,
-                        "plant_match": False,
-                        "error": "❌ L'image ne correspond pas au type de plante sélectionné.",
-                        "expected": plant_check.get("expected", ""),
-                        "detected_shape": plant_check.get("detected_shape", ""),
-                        "confidence": plant_check.get("confidence", 0),
-                        "reason": plant_check.get("reason", ""),
-                    }), 400
+                    logger.warning(
+                        f"   ⚠️ Morphologie plante '{plant_type}' non confirmée — "
+                        f"{plant_check.get('reason')} — analyse continuée"
+                    )
+                    if leaf_warning is None:
+                        leaf_warning = (
+                            f"⚠️ La morphologie de la feuille ne correspond pas parfaitement "
+                            f"au type '{plant_type}' sélectionné. Le résultat peut être moins précis."
+                        )
+                    else:
+                        leaf_warning += (
+                            f" | Morphologie plante non confirmée ({plant_check.get('reason', '')})."
+                        )
             except Exception as e:
                 logger.warning(f"   ⚠️ Validation plante échouée (non bloquante): {str(e)}")
 
