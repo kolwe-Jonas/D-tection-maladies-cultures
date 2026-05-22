@@ -865,126 +865,123 @@ def _compute_vein_structure_score(
         return round(score, 3), round(pct_primary, 2), round(pct_secondary, 2), note
 
 
-def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict[str, object]:
-        """Validation probabiliste multi-composantes — système à 3 niveaux.
+def compute_leaf_score(image: object, plant_type: Optional[str] = None) -> Dict[str, object]:
+        """Score global de validation feuille basé sur 4 critères pondérés.
 
-        Formule pondérée :
-            leaf_score = color_score * 0.40 + texture_score * 0.30 + shape_score * 0.30
+        Formule : leaf_score = couleur*0.40 + texture*0.25 + forme*0.20 + contours*0.15
 
         Niveaux de décision :
-            leaf_score < 0.60  → rejet définitif (pas une feuille)
-            0.60 ≤ score < 0.80 → feuille incertaine acceptée avec avertissement
-            leaf_score ≥ 0.80  → feuille valide
+            leaf_score < 45   → rejet définitif
+            45 <= score < 65  → feuille probable (warning)
+            leaf_score >= 65  → feuille valide
 
-        Aucun critère seul (couleur, texture ou forme) ne peut rejeter une image.
-        Seul le score combiné détermine le rejet.
+        AUCUN critère individuel ne provoque de rejet.
+        Seul le score global détermine la décision.
 
         Tolérances intégrées :
-        - Mauvaise lumière : bonus si luminosité faible mais végétation présente
+        - Feuilles jaunes/malades : palette végétale large (pas uniquement vert)
+        - Mauvaise lumière : bonus sous-exposition si végétation détectée
+        - Flou caméra mobile : plancher texture relevé, jamais 0
         - Feuille partiellement visible : pénalité forme réduite
-        - Flou caméra mobile (Laplacian faible) : plancher texture relevé
-
-        Rejette uniquement les non-plantes clairs (tissu + absence végétation,
-        peau dominante, objets artificiels géométriques).
 
         Retourne:
                 {
-                        "is_leaf": True/False,
-                        "low_confidence_leaf": True/False,
-                        "confidence": 0-100,
-                        "leaf_score": float,
+                        "is_leaf": bool,
+                        "low_confidence_leaf": bool,
+                        "leaf_score": float (0-100),
                         "color_score": float,
-                        "shape_score": float,
                         "texture_score": float,
-                        "vein_score": float,
+                        "shape_score": float,
+                        "contour_score": float,
+                        "veg_percent": float,
                         "reason": str
                 }
         """
-        REJECT_THRESHOLD = 0.60
-        UNCERTAIN_THRESHOLD = 0.80
-        MANIOC_REJECT_THRESHOLD = 0.62
-        MANIOC_MIN_VEIN = 0.35  # assoupli vs 0.40
+        REJECT_THRESHOLD = 45.0
+        WARNING_THRESHOLD = 65.0
 
-        def _reject(reason: str, shape: float = 0.0, tex: float = 0.0,
-                    col: float = 0.0, vein: float = 0.0) -> Dict:
-                ls = round(col * 0.40 + tex * 0.30 + shape * 0.30, 4)
+        # Résultat vide par défaut (retour d'erreur)
+        def _empty_result(reason: str) -> Dict:
                 return {
-                        "is_leaf": False,
-                        "low_confidence_leaf": False,
-                        "confidence": int(ls * 100),
-                        "leaf_score": ls,
-                        "color_score": round(col, 3),
-                        "shape_score": round(shape, 3),
-                        "texture_score": round(tex, 3),
-                        "vein_score": round(vein, 3),
-                        "reason": reason,
+                        "is_leaf": False, "low_confidence_leaf": False,
+                        "leaf_score": 0.0, "color_score": 0.0, "texture_score": 0.0,
+                        "shape_score": 0.0, "contour_score": 0.0, "veg_percent": 0.0,
+                        "confidence": 0, "vein_score": 0.0, "reason": reason,
                 }
 
         try:
                 img = load_image(image)
                 img = _ensure_small(img, max_dim=640)
         except Exception as exc:
-                return _reject(f"Impossible de charger l'image : {exc}")
+                return _empty_result(f"Impossible de charger l'image : {exc}")
 
         h, w = img.shape[:2]
         total_pixels = float(h * w)
         if total_pixels < 400:
-                return _reject("Image trop petite")
+                return _empty_result("Image trop petite")
 
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+        hue = hsv[:, :, 0]
+        sat = hsv[:, :, 1]
+        val = hsv[:, :, 2]
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         b_f = img[:, :, 0].astype(np.float32)
         g_f = img[:, :, 1].astype(np.float32)
         r_f = img[:, :, 2].astype(np.float32)
 
         # ==============================================================
-        # A. COLOR_SCORE (0-1, poids 40%)
-        #    HSV végétation + ExG — jamais bloquant seul
+        # A. SCORE COULEUR VÉGÉTALE (40%)
+        # Palette large : vert sain + jaune (chlorose) + brun (nécrose)
+        # + vert sombre (ombragé) + rouille (maladie)
+        # Une feuille malade n'est PAS forcément verte.
         # ==============================================================
-        exg = 2.0 * g_f - r_f - b_f
-        mean_exg = float(np.mean(exg))
-        pct_exg = 100.0 * float(np.count_nonzero(exg > 8)) / total_pixels
+        mask_green      = ((hue >= 22) & (hue <= 92) & (sat > 15) & (val > 15)).astype(np.uint8)
+        mask_yellow     = ((hue >= 15) & (hue <= 40) & (sat > 18) & (val > 30)).astype(np.uint8)
+        mask_brown      = ((hue >= 4)  & (hue <= 25) & (sat > 15) & (val > 10)).astype(np.uint8)
+        mask_dark_green = ((hue >= 28) & (hue <= 88) & (val >= 8) & (val < 85) & (sat > 10)).astype(np.uint8)
+        mask_rust       = ((hue >= 8)  & (hue <= 28) & (sat > 28) & (val > 22)).astype(np.uint8)
 
-        green_m = ((hue >= 25) & (hue <= 90) & (sat > 28) & (val > 28)).astype(np.uint8)
-        yellow_m = ((hue >= 11) & (hue <= 36) & (sat > 32) & (val > 45)).astype(np.uint8)
-        brown_m = ((hue >= 4) & (hue <= 22) & (sat > 25) & (val > 20)).astype(np.uint8)
-        veg_m = np.clip(
-                green_m.astype(np.uint16) + yellow_m.astype(np.uint16) + brown_m.astype(np.uint16),
+        veg_mask = np.clip(
+                mask_green.astype(np.uint16) + mask_yellow.astype(np.uint16) +
+                mask_brown.astype(np.uint16) + mask_dark_green.astype(np.uint16) +
+                mask_rust.astype(np.uint16),
                 0, 1,
         ).astype(np.uint8)
-        pct_veg = 100.0 * float(np.count_nonzero(veg_m)) / total_pixels
+        pct_veg = 100.0 * float(np.count_nonzero(veg_mask)) / total_pixels
 
-        # Score couleur : proportion végétation normalisée + bonus ExG
-        color_from_veg = min(1.0, pct_veg / 30.0)  # 30% végétation = score plein
+        # ExG comme signal d'appui (non bloquant)
+        exg = 2.0 * g_f - r_f - b_f
+        mean_exg = float(np.mean(exg))
+        pct_exg_pos = 100.0 * float(np.count_nonzero(exg > 5)) / total_pixels
+
+        # Score couleur : 20% végétation = score maximal (seuil bas volontaire)
+        color_score_base = min(100.0, pct_veg * (100.0 / 20.0))
+
+        # Bonus ExG (signal vert actif — feuille saine ou légèrement malade)
         exg_bonus = 0.0
-        if mean_exg > 5:
-                exg_bonus = 0.08
-        if mean_exg > 15:
-                exg_bonus = 0.15
-        if pct_exg > 20:
-                exg_bonus = min(0.20, exg_bonus + 0.05)
-        # Tolérance mauvaise lumière : si très sombre, ExG peut être faible mais végétation réelle
+        if mean_exg > 3:
+                exg_bonus += 5.0
+        if mean_exg > 10:
+                exg_bonus += 5.0
+        if pct_exg_pos > 15:
+                exg_bonus += 5.0
+
+        # Tolérance mauvaise lumière : sous-exposition ≠ absence de végétation
         mean_brightness = float(np.mean(gray))
-        if mean_brightness < 60 and pct_veg >= 5.0:
-                exg_bonus = max(exg_bonus, 0.10)  # boost pour sous-exposition
-        color_score = min(1.0, color_from_veg + exg_bonus)
+        if mean_brightness < 70 and pct_veg >= 4.0:
+                exg_bonus += 8.0
 
-        # Rejet combiné : couleur ET ExG tous deux inexistants
-        if mean_exg <= -5 and pct_veg < 5.0 and color_score < 0.15:
-                return _reject(
-                        f"ExG très négatif ({mean_exg:.1f}) + végétation absente ({pct_veg:.0f}%) — non végétal",
-                        col=color_score,
-                )
+        color_score = min(100.0, color_score_base + exg_bonus)
 
         # ==============================================================
-        # DÉTECTION TISSU / VÊTEMENT
-        # Rejet uniquement si tissu confirmé ET végétation absente
+        # B. SCORE TEXTURE NATURELLE (25%)
+        # Organique = non uniforme. Flou caméra mobile → plancher relevé.
+        # Jamais score 0 : une feuille lisse reste une feuille.
         # ==============================================================
-        is_fabric, fabric_reason = _detect_fabric_pattern(gray, total_pixels)
+        lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
         block = 16
-        bh_b, bw_b = h // block, w // block
+        bh_b, bw_b = max(1, h // block), max(1, w // block)
         local_vars_b: List[float] = []
         for bi in range(bh_b):
                 for bj in range(bw_b):
@@ -994,38 +991,45 @@ def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict
         local_var_std = float(np.std(local_vars_b)) if local_vars_b else 0.0
         non_uniformity = local_var_std / (local_var_mean + 1.0)
 
-        lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        # Boost flou : photo mobile bougée → Laplacian faible mais réelle feuille
+        blur_boost = 12.0 if lap_var < 50.0 else 0.0
+
+        if lap_var < 8:
+                texture_score = 18.0 + blur_boost
+        elif lap_var < 30:
+                texture_score = 32.0 + min(12.0, non_uniformity * 10.0) + blur_boost
+        elif lap_var < 80:
+                texture_score = 55.0 + min(18.0, non_uniformity * 12.0)
+        elif lap_var < 200:
+                texture_score = 72.0 + min(15.0, non_uniformity * 10.0)
+        else:
+                texture_score = 85.0 + min(15.0, non_uniformity * 8.0)
+
+        # Détection tissu périodique : pénalité mais PAS rejet seul
+        is_fabric, fabric_reason = _detect_fabric_pattern(gray, total_pixels)
         fabric_uniform = non_uniformity < 0.35 and lap_var < 60.0
+        if is_fabric and fabric_uniform:
+                texture_score *= 0.60  # pénalité tissu
 
-        skin_dom = ((hue >= 2) & (hue <= 18) & (sat > 25) & (sat < 160) & (val > 60)).astype(np.uint8)
-        pct_skin = 100.0 * float(np.count_nonzero(skin_dom)) / total_pixels
-
-        # Rejet tissu : seulement si tissu confirmé + texture uniforme + quasi pas de végétation
-        if is_fabric and fabric_uniform and pct_veg < 15.0:
-                return _reject(
-                        f"vêtement/tissu détecté ({fabric_reason}) — texture uniforme périodique",
-                        col=color_score,
-                )
-        # Rejet peau humaine : seulement si très dominante et pas de végétation
-        if pct_skin > 50.0 and pct_veg < 10.0:
-                return _reject(
-                        f"peau humaine dominante ({pct_skin:.0f}%) — rejet",
-                        col=color_score,
-                )
+        texture_score = max(0.0, min(100.0, texture_score))
 
         # ==============================================================
-        # B. SHAPE_SCORE (0-1, poids 30%)
-        #    Forme biologique organique — tolérance feuille partielle
+        # C. SCORE FORME ORGANIQUE (20%)
+        # Formes biologiques (sol 0.45-0.97) : score élevé.
+        # Rectangles / cercles parfaits : score bas.
+        # Feuille partiellement visible : boost si végétation confirmée.
         # ==============================================================
         blurred = cv2.GaussianBlur(gray, (9, 9), 0)
-        _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        contours_v, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        _, thresh_bin = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        contours_v, _ = cv2.findContours(thresh_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        shape_score = 0.0
-        shape_note = "aucun contour"
-        solidity_val = 0.0
-        compactness_val = 0.0
+        shape_score = 45.0  # score neutre par défaut
+        shape_note = "forme indéterminée"
+        solidity_val = 0.5
+        compactness_val = 0.5
         coverage_val = 0.0
+        c_area = 0.0
+        c_perim = 0.0
 
         if contours_v:
                 largest_v = max(contours_v, key=cv2.contourArea)
@@ -1033,166 +1037,168 @@ def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict
                 c_perim = float(cv2.arcLength(largest_v, True))
                 coverage_val = c_area / total_pixels
 
-                # Tolérance feuille partiellement visible (hors cadre)
-                partial_boost = 0.0
-                if 0.02 <= coverage_val < 0.10:
-                        partial_boost = 0.12  # feuille coupée par le cadre
-
                 if coverage_val < 0.02:
-                        shape_score = 0.12 + partial_boost
-                        shape_note = f"objet trop petit ({coverage_val*100:.0f}%)"
+                        # Très petit ou très partiel — score modéré
+                        shape_score = 38.0
+                        shape_note = f"couverture très faible ({coverage_val * 100:.1f}%)"
                 elif c_perim > 0:
                         hull_v = cv2.convexHull(largest_v)
                         hull_area = float(cv2.contourArea(hull_v))
-                        solidity_val = c_area / hull_area if hull_area > 0 else 0.0
+                        solidity_val = c_area / hull_area if hull_area > 0 else 0.5
                         compactness_val = (4.0 * np.pi * c_area) / (c_perim ** 2)
 
-                        edges_c = cv2.Canny(gray, 50, 150)
-                        lines_c = cv2.HoughLinesP(
-                                edges_c, 1, np.pi / 180, threshold=55,
-                                minLineLength=int(min(h, w) * 0.20), maxLineGap=8,
-                        )
-                        n_lines = len(lines_c) if lines_c is not None else 0
-
-                        if solidity_val > 0.97 and compactness_val > 0.70:
-                                # Forme rectangulaire/artificielle — score bas mais pas bloquant seul
-                                shape_score = 0.10 + partial_boost
-                                shape_note = f"forme rectangulaire/artificielle (sol={solidity_val:.2f})"
-                        elif compactness_val > 0.85:
-                                shape_score = 0.15 + partial_boost
-                                shape_note = f"forme trop circulaire (cpt={compactness_val:.2f})"
-                        elif n_lines >= 8 and pct_veg < 18.0:
-                                shape_score = 0.18 + partial_boost
-                                shape_note = f"structure linéaire rigide ({n_lines} lignes)"
-                        elif 0.60 <= solidity_val <= 0.95 and compactness_val < 0.75:
-                                base = 0.70
-                                if coverage_val >= 0.25:
-                                        base += 0.22
-                                elif coverage_val >= 0.10:
-                                        base += 0.12
-                                else:
-                                        base += partial_boost
-                                if compactness_val < 0.40:
-                                        base += 0.10  # contour irrégulier/lobé
-                                shape_score = min(1.0, base)
-                                shape_note = f"forme feuille (sol={solidity_val:.2f}, cpt={compactness_val:.2f}, cov={coverage_val*100:.0f}%)"
-                        elif 0.50 <= solidity_val < 0.60 and compactness_val < 0.68:
-                                # Feuille palmée/lobée (manioc, coton) — solidity basse = lobes
-                                base = 0.60 + partial_boost
-                                if coverage_val >= 0.15:
-                                        base += 0.12
-                                shape_score = min(1.0, base)
-                                shape_note = f"feuille lobée/palmée (sol={solidity_val:.2f})"
-                        elif 0.95 < solidity_val <= 0.98 and compactness_val < 0.60:
-                                shape_score = 0.62 + partial_boost
-                                shape_note = f"feuille allongée (sol={solidity_val:.2f})"
+                        if solidity_val > 0.97 and compactness_val > 0.75:
+                                # Rectangle ou carré parfait → artificiel
+                                shape_score = 18.0
+                                shape_note = f"forme rectangulaire (sol={solidity_val:.2f}, cpt={compactness_val:.2f})"
+                        elif compactness_val > 0.88:
+                                # Cercle parfait → non végétal probable
+                                shape_score = 22.0
+                                shape_note = f"forme circulaire (cpt={compactness_val:.2f})"
+                        elif 0.45 <= solidity_val <= 0.97 and compactness_val < 0.82:
+                                # Zone organique — score élevé (feuille probable)
+                                base = 65.0
+                                if 0.55 <= solidity_val <= 0.92:
+                                        base += 15.0  # plage idéale feuille
+                                if coverage_val >= 0.20:
+                                        base += 12.0
+                                elif coverage_val >= 0.08:
+                                        base += 6.0
+                                if compactness_val < 0.45:
+                                        base += 8.0  # lobée/irrégulière = feuille probable
+                                shape_score = min(100.0, base)
+                                shape_note = f"forme organique (sol={solidity_val:.2f}, cpt={compactness_val:.2f})"
+                        elif solidity_val > 0.97 and compactness_val <= 0.75:
+                                # Allongée/fine + très solide (graminée)
+                                shape_score = 62.0
+                                shape_note = f"forme allongée (sol={solidity_val:.2f})"
                         else:
-                                # Forme ambiguë : score plancher relevé — ne bloque pas seul
-                                shape_score = 0.28 + partial_boost
+                                # Forme ambiguë → score modéré (ne bloque pas)
+                                shape_score = 42.0
                                 shape_note = f"forme ambiguë (sol={solidity_val:.2f}, cpt={compactness_val:.2f})"
 
-        shape_score = max(0.0, min(1.0, shape_score))
+        # Boost feuille partiellement visible (hors cadre) si végétation présente
+        if 0.02 <= coverage_val < 0.12 and pct_veg >= 10.0:
+                shape_score = max(shape_score, 50.0)
+
+        shape_score = max(0.0, min(100.0, shape_score))
 
         # ==============================================================
-        # C. TEXTURE_SCORE (0-1, poids 30%)
-        #    Tolérance flou caméra mobile : plancher relevé
+        # D. SCORE CONTOURS NATURELS (15%)
+        # Contours complexes/irréguliers = feuille.
+        # Contours droits rigides = objet artificiel.
         # ==============================================================
-        # Détection flou (photo mobile) : Laplacian faible
-        is_blurry = lap_var < 50.0
-        blur_tolerance = 0.15 if is_blurry else 0.0
+        edges = cv2.Canny(gray, 40, 120)
+        contour_score = 50.0  # neutre par défaut
 
-        texture_note = ""
-        if lap_var < 5.0:
-                # Surface quasiment plate — bas mais pas zéro (feuille très lisse possible)
-                texture_score = 0.10 + blur_tolerance
-                texture_note = f"surface très plate (Lap={lap_var:.0f})"
-        elif lap_var < 30.0:
-                texture_score = 0.25 + min(0.15, non_uniformity * 0.12) + blur_tolerance
-                texture_note = f"texture faible (Lap={lap_var:.0f})"
-        elif lap_var < 70.0:
-                base_t = 0.52 + min(0.20, non_uniformity * 0.15)
-                texture_score = min(1.0, base_t)
-                texture_note = f"texture modérée (Lap={lap_var:.0f}, non-unif={non_uniformity:.2f})"
-        else:
-                base_t = 0.75 + min(0.25, non_uniformity * 0.20)
-                texture_score = min(1.0, base_t)
-                texture_note = f"texture biologique élevée (Lap={lap_var:.0f})"
+        if contours_v and coverage_val >= 0.02 and c_area > 0 and c_perim > 0:
+                # Complexité = périmètre / √aire (feuille : 5-20, rectangle : ~3.6)
+                complexity = c_perim / (float(np.sqrt(c_area)) + 1e-6)
+                if complexity > 12:
+                        contour_score = 88.0
+                elif complexity > 8:
+                        contour_score = 75.0
+                elif complexity > 5:
+                        contour_score = 62.0
+                elif complexity > 3.8:
+                        contour_score = 50.0
+                else:
+                        contour_score = 28.0  # contour trop simple → artificiel
 
-        # Pénalité tissu uniforme — atténuée (pénalise mais ne bloque pas)
-        if fabric_uniform:
-                texture_score *= 0.65
-                texture_note += " [tissu uniforme détecté]"
+                # Pénalité lignes droites rigides (Hough) — seulement si peu de végétation
+                lines = cv2.HoughLinesP(
+                        edges, 1, np.pi / 180, threshold=50,
+                        minLineLength=int(min(h, w) * 0.18), maxLineGap=10,
+                )
+                n_lines = len(lines) if lines is not None else 0
+                if n_lines >= 10 and pct_veg < 15.0:
+                        contour_score *= 0.55
+                elif n_lines >= 6 and pct_veg < 10.0:
+                        contour_score *= 0.65
 
-        texture_score = max(0.0, min(1.0, texture_score))
-
-        # ==============================================================
-        # D. VEIN_SCORE (informatif — ne contribue pas directement au score)
-        #    Utilisé comme signal d'appui, pas comme critère de rejet
-        # ==============================================================
-        vein_score, pct_prim, pct_sec, vein_note = _compute_vein_structure_score(img, gray, total_pixels)
+        contour_score = max(0.0, min(100.0, contour_score))
 
         # ==============================================================
         # SCORE FINAL PONDÉRÉ
-        # leaf_score = color * 0.40 + texture * 0.30 + shape * 0.30
+        # couleur*0.40 + texture*0.25 + forme*0.20 + contours*0.15
         # ==============================================================
-        leaf_score = round(color_score * 0.40 + texture_score * 0.30 + shape_score * 0.30, 4)
+        leaf_score = round(
+                color_score * 0.40 +
+                texture_score * 0.25 +
+                shape_score * 0.20 +
+                contour_score * 0.15,
+                2,
+        )
 
-        # Bonus vein : signal d'appui (réseaux veineux visibles = feuille probable)
-        if vein_score >= 0.50:
-                leaf_score = min(1.0, leaf_score + 0.04)
-        elif vein_score >= 0.35:
-                leaf_score = min(1.0, leaf_score + 0.02)
-        leaf_score = round(leaf_score, 4)
+        # ==============================================================
+        # MODIFICATEURS HARD REJECT (combinés — jamais seul)
+        # Tissu + absence totale végétation → plafonner score
+        # Peau humaine dominante + absence végétation → plafonner score
+        # ==============================================================
+        skin_mask = ((hue >= 2) & (hue <= 18) & (sat > 25) & (sat < 160) & (val > 60)).astype(np.uint8)
+        pct_skin = 100.0 * float(np.count_nonzero(skin_mask)) / total_pixels
 
-        # --- Seuils et conditions spécifiques ---
-        threshold = REJECT_THRESHOLD
-        extra_condition_fail = False
-        extra_reason = ""
+        hard_reject_reason = None
+        if is_fabric and fabric_uniform and pct_veg < 12.0:
+                leaf_score = min(leaf_score, 28.0)
+                hard_reject_reason = f"vêtement/tissu détecté ({fabric_reason})"
+        elif pct_skin > 55.0 and pct_veg < 8.0:
+                leaf_score = min(leaf_score, 22.0)
+                hard_reject_reason = f"peau humaine dominante ({pct_skin:.0f}%)"
 
-        # Exigences manioc — assouplies : vein seul ne bloque pas si score global OK
-        if plant_type == "manioc":
-                threshold = MANIOC_REJECT_THRESHOLD
-                if vein_score < MANIOC_MIN_VEIN and leaf_score < 0.72:
-                        extra_condition_fail = True
-                        extra_reason = (
-                                f"nervures insuffisantes pour manioc "
-                                f"(vein={vein_score:.2f} < {MANIOC_MIN_VEIN}) et score global faible"
-                        )
+        leaf_score = round(leaf_score, 2)
 
-        is_leaf = (leaf_score >= threshold) and (not extra_condition_fail)
-        low_confidence_leaf = is_leaf and leaf_score < UNCERTAIN_THRESHOLD
+        # ==============================================================
+        # DÉCISION FINALE
+        # ==============================================================
+        is_leaf = leaf_score >= REJECT_THRESHOLD
+        low_confidence_leaf = is_leaf and leaf_score < WARNING_THRESHOLD
 
-        # --- Message utilisateur ---
-        if is_leaf:
-                if low_confidence_leaf:
-                        primary_reason = f"feuille détectée (confiance limitée) — {shape_note}"
-                else:
-                        primary_reason = f"{shape_note} | {texture_note}"
+        if hard_reject_reason:
+                reason = f"Image rejetée — {hard_reject_reason}"
+        elif not is_leaf:
+                parts: List[str] = []
+                if color_score < 30:
+                        parts.append(f"couleur non végétale (veg={pct_veg:.0f}%)")
+                if shape_score < 30:
+                        parts.append(shape_note)
+                if not parts:
+                        parts.append(f"score global insuffisant ({leaf_score:.0f}/100)")
+                reason = "Image rejetée — " + "; ".join(parts)
+        elif low_confidence_leaf:
+                reason = f"Feuille probable (confiance limitée) — {shape_note}"
         else:
-                bad: List[str] = []
-                if extra_condition_fail:
-                        bad.append(extra_reason)
-                if color_score < 0.30:
-                        bad.append(f"couleur non végétale (veg={pct_veg:.0f}%, ExG={mean_exg:.1f})")
-                if shape_score < 0.30:
-                        bad.append(shape_note)
-                if texture_score < 0.20:
-                        bad.append(texture_note)
-                if not bad:
-                        bad.append("score global insuffisant")
-                primary_reason = "Image rejetée — " + "; ".join(bad[:2])
+                reason = f"Feuille détectée — {shape_note}"
+
+        # Debug
+        print(
+                f"Leaf score: {leaf_score:.1f}/100 "
+                f"(couleur={color_score:.1f}, texture={texture_score:.1f}, "
+                f"forme={shape_score:.1f}, contours={contour_score:.1f}, "
+                f"veg={pct_veg:.1f}%, lap={lap_var:.1f})"
+        )
+
+        # Vein score conservé pour compatibilité (signal d'appui, non bloquant)
+        vein_score, _, _, _ = _compute_vein_structure_score(img, gray, total_pixels)
 
         return {
                 "is_leaf": is_leaf,
                 "low_confidence_leaf": low_confidence_leaf,
-                "confidence": int(round(leaf_score * 100)),
                 "leaf_score": leaf_score,
-                "color_score": round(color_score, 3),
-                "shape_score": round(shape_score, 3),
-                "texture_score": round(texture_score, 3),
+                "confidence": int(leaf_score),
+                "color_score": round(color_score, 1),
+                "texture_score": round(texture_score, 1),
+                "shape_score": round(shape_score, 1),
+                "contour_score": round(contour_score, 1),
+                "veg_percent": round(pct_veg, 1),
                 "vein_score": round(vein_score, 3),
-                "reason": primary_reason,
+                "reason": reason,
         }
+
+
+def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict[str, object]:
+        """Wrapper de compatibilité — délègue entièrement à compute_leaf_score."""
+        return compute_leaf_score(image, plant_type=plant_type)
 
 
 def validate_plant_match(analysis: Dict, plant_type: str) -> Dict[str, object]:
