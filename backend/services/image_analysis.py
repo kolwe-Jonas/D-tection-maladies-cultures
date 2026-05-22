@@ -1285,6 +1285,107 @@ def _compute_disease_pattern_score(
         )
 
 
+def _compute_artificial_penalty(
+        img: np.ndarray,
+        hsv: np.ndarray,
+        gray: np.ndarray,
+        total_pixels: float,
+        disease_pattern_score: float,
+        veg_percent_broad: float,
+) -> Tuple[float, Dict[str, float]]:
+        """Pénalité légère pour objets artificiels évidents (multi-signaux requis).
+
+        Ne s'applique QUE si disease_pattern_score < 20 ET veg_percent < 35.
+        Requiert au minimum 3 signaux simultanés pour éviter les faux positifs.
+        Maximum : -12 points sur leaf_score.
+        """
+        if disease_pattern_score >= 20.0 or veg_percent_broad >= 35.0:
+                return 0.0, {}
+
+        hue = hsv[:, :, 0]
+        sat = hsv[:, :, 1]
+        val = hsv[:, :, 2]
+        signals: Dict[str, float] = {}
+        n_signals = 0
+
+        # 1. Couleurs artificiellement saturées (bleu vif, magenta, cyan, rouge pur)
+        #    Ces teintes n'existent pratiquement pas dans la végétation saine ou malade
+        artificial_hues = (
+                ((hue >= 100) & (hue <= 130) & (sat > 145))
+                | ((hue >= 140) & (hue <= 170) & (sat > 135))
+                | ((hue >= 85)  & (hue <= 100) & (sat > 165))
+                | ((hue >= 0)   & (hue <= 5)   & (sat > 185) & (val > 100))
+        ).astype(np.uint8)
+        pct_art_hue = 100.0 * float(np.count_nonzero(artificial_hues)) / total_pixels
+        signals["pct_artificial_hue"] = round(pct_art_hue, 2)
+        if pct_art_hue > 28.0:
+                n_signals += 1
+
+        # 2. Grandes zones trop uniformes (surface plastique, papier, écran)
+        h_img, w_img = gray.shape
+        block = 24
+        bh = max(1, h_img // block)
+        bw_b = max(1, w_img // block)
+        block_vars: List[float] = []
+        for bi in range(bh):
+                for bj in range(bw_b):
+                        patch = gray[bi * block:(bi + 1) * block, bj * block:(bj + 1) * block]
+                        block_vars.append(float(patch.var()))
+        median_bvar = float(np.median(block_vars)) if block_vars else 100.0
+        signals["median_block_var"] = round(median_bvar, 2)
+        if median_bvar < 12.0:
+                n_signals += 1
+
+        # 3. Transitions de couleur trop nettes (impression, écran, plastique)
+        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        grad_mag = np.sqrt(sobel_x ** 2 + sobel_y ** 2)
+        mean_grad = float(np.mean(grad_mag))
+        std_grad  = float(np.std(grad_mag))
+        grad_cv   = std_grad / (mean_grad + 1.0)
+        edges_canny = cv2.Canny(gray, 80, 160)
+        pct_edges = 100.0 * float(np.count_nonzero(edges_canny)) / total_pixels
+        signals["grad_cv"]    = round(grad_cv, 3)
+        signals["pct_edges"]  = round(pct_edges, 2)
+        if grad_cv > 3.8 and pct_edges < 7.0 and mean_grad < 22.0:
+                n_signals += 1
+
+        # 4. Absence de nervures fines (aucune structure vasculaire détectée)
+        green_ch = img[:, :, 1]
+        k7 = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+        tophat7 = cv2.morphologyEx(green_ch, cv2.MORPH_TOPHAT, k7)
+        _, vein_m7 = cv2.threshold(tophat7, 8, 255, cv2.THRESH_BINARY)
+        vein_pct_fine = 100.0 * float(np.count_nonzero(vein_m7)) / total_pixels
+        signals["vein_pct_fine"] = round(vein_pct_fine, 2)
+        if vein_pct_fine < 1.2:
+                n_signals += 1
+
+        # 5. Dominance monochrome très saturée (un seul pic de teinte fort)
+        sat_mask = sat > 85
+        pct_saturated = 100.0 * float(np.count_nonzero(sat_mask)) / total_pixels
+        hue_dominant_pct = 0.0
+        if pct_saturated > 30.0:
+                hue_sat = hue[sat_mask]
+                if hue_sat.size > 0:
+                        hue_hist, _ = np.histogram(hue_sat, bins=36, range=(0, 180))
+                        hue_dominant_pct = 100.0 * float(hue_hist.max()) / float(hue_sat.size)
+                        if hue_dominant_pct > 58.0 and pct_saturated > 42.0:
+                                n_signals += 1
+        signals["hue_dominant_pct"] = round(hue_dominant_pct, 2)
+
+        signals["n_signals"] = float(n_signals)
+
+        # Pénalité progressive — uniquement à partir de 3 signaux simultanés
+        if n_signals >= 4:
+                penalty = 12.0
+        elif n_signals == 3:
+                penalty = 6.0
+        else:
+                penalty = 0.0
+
+        return penalty, signals
+
+
 def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict[str, object]:
         """Validation feuille agricole — système simple et stable.
 
@@ -1523,6 +1624,25 @@ def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict
                 vegetation_structure_score * 0.10,
                 2,
         )
+
+        # ═══════════════════════════════════════════════════════════════
+        # PÉNALITÉ OBJETS ARTIFICIELS — légère, multi-signaux requis
+        # Réduit le score si plusieurs indicateurs d'artificiel sont combinés.
+        # Inoffensive pour les vraies feuilles (disease_pattern > 20 → skip).
+        # ═══════════════════════════════════════════════════════════════
+        art_penalty, art_signals = _compute_artificial_penalty(
+                img, hsv, gray, total_pixels,
+                disease_pattern_score, veg_percent_broad,
+        )
+        if art_penalty > 0.0:
+                leaf_score = max(0.0, leaf_score - art_penalty)
+                print(
+                        f"[ARTIFICIAL PENALTY] -{art_penalty:.1f}pt "
+                        f"n_signals={int(art_signals.get('n_signals', 0))} "
+                        f"art_hue={art_signals.get('pct_artificial_hue', 0):.1f}% "
+                        f"block_var={art_signals.get('median_block_var', 0):.1f} "
+                        f"vein={art_signals.get('vein_pct_fine', 0):.1f}%"
+                )
 
         # ═══════════════════════════════════════════════════════════════
         # REJET STRICT — 5 cas inutilisables (signaux COMBINÉS uniquement)
