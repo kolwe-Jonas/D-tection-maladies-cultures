@@ -865,6 +865,124 @@ def _compute_vein_structure_score(
         return round(score, 3), round(pct_primary, 2), round(pct_secondary, 2), note
 
 
+# ---------------------------------------------------------------------------
+# Détection des symptômes agricoles (boost score feuille malade)
+# ---------------------------------------------------------------------------
+
+def _compute_disease_pattern_score(
+        img: np.ndarray,
+        hsv: np.ndarray,
+        gray: np.ndarray,
+        total_pixels: float,
+) -> Tuple[float, float, Dict[str, float]]:
+        """Détecte les motifs de maladies agricoles et retourne un score 0-100.
+
+        Reconnaît : chlorose, rouille, nécrose, zones sèches, mildiou,
+        nervures visibles, taches biologiques, motifs irréguliers.
+
+        Une feuille malade a presque toujours plusieurs de ces symptômes.
+        Un objet artificiel (vêtement, peau, mur) n'en a aucun.
+
+        Retourne (disease_pattern_score, vegetation_percent, symptom_details).
+        """
+        hue = hsv[:, :, 0]
+        sat = hsv[:, :, 1]
+        val = hsv[:, :, 2]
+        symptoms: Dict[str, float] = {}
+
+        # 1. Chlorose — jaunissement uniforme ou partiel (hue jaune-vert pâle)
+        chlorosis = (
+                (hue >= 15) & (hue <= 45) & (sat > 22) & (val > 70)
+        ).astype(np.uint8)
+        symptoms["chlorose"] = 100.0 * float(np.count_nonzero(chlorosis)) / total_pixels
+
+        # 2. Rouille — taches orange-brun typiques
+        rust = (
+                (hue >= 3) & (hue <= 22) & (sat > 55) & (val > 50) & (val < 200)
+        ).astype(np.uint8)
+        symptoms["rouille"] = 100.0 * float(np.count_nonzero(rust)) / total_pixels
+
+        # 3. Nécrose / brûlures — brun foncé à noir
+        necrosis = (
+                ((hue >= 0) & (hue <= 22) & (sat > 25) & (val < 110))
+                | (val < 35)
+        ).astype(np.uint8)
+        symptoms["necrose"] = 100.0 * float(np.count_nonzero(necrosis)) / total_pixels
+
+        # 4. Zones sèches — beige/tan désaturé (feuilles brûlées, sèches)
+        dry = (
+                (sat < 68) & (val > 78) & (val < 220) & (hue >= 8) & (hue <= 52)
+        ).astype(np.uint8)
+        symptoms["sec"] = 100.0 * float(np.count_nonzero(dry)) / total_pixels
+
+        # 5. Mildiou — zones blanchâtres / poudre gris-vert
+        mildew = (
+                (sat < 52) & (val > 150) & (hue >= 25) & (hue <= 95)
+        ).astype(np.uint8)
+        symptoms["mildiou"] = 100.0 * float(np.count_nonzero(mildew)) / total_pixels
+
+        # 6. Mosaïque — alternance vert/jaune avec forte variance locale
+        mosaic_mask = (
+                ((hue >= 18) & (hue <= 90) & (sat > 18) & (val > 40))
+        ).astype(np.uint8) * 255
+        mosaic_lap = float(cv2.Laplacian(mosaic_mask, cv2.CV_64F).var())
+        symptoms["mosaique"] = min(100.0, mosaic_lap / 80.0)
+
+        # 7. Tons végétaux larges (inclut feuilles malades jaunes/brunes/sèches)
+        veg_broad = (
+                ((hue >= 10) & (hue <= 100) & (sat > 12) & (val > 15))
+                | ((hue >= 2) & (hue <= 10) & (sat > 28) & (val > 30))
+        ).astype(np.uint8)
+        veg_percent = 100.0 * float(np.count_nonzero(veg_broad)) / total_pixels
+
+        # 8. Nervures visibles — top-hat multi-échelles
+        green_ch = img[:, :, 1]
+        k13 = cv2.getStructuringElement(cv2.MORPH_RECT, (13, 13))
+        tophat13 = cv2.morphologyEx(green_ch, cv2.MORPH_TOPHAT, k13)
+        _, vein_m = cv2.threshold(tophat13, 8, 255, cv2.THRESH_BINARY)
+        vein_pct = 100.0 * float(np.count_nonzero(vein_m)) / total_pixels
+        symptoms["nervures"] = vein_pct
+
+        # 9. Taches biologiques irrégulières (composantes sombres de taille cohérente)
+        dark_spots = (val < 85).astype(np.uint8) * 255
+        n_comp, _, stats_spots, _ = cv2.connectedComponentsWithStats(dark_spots, connectivity=8)
+        circular_spots = sum(
+                1 for i in range(1, n_comp)
+                if 18 < stats_spots[i, cv2.CC_STAT_AREA] < 6000
+        )
+        symptoms["taches_bio"] = min(100.0, circular_spots * 7.0)
+
+        # 10. Texture biologique — std du gradient (irrégularité organique)
+        lap_abs = np.abs(cv2.Laplacian(gray, cv2.CV_64F))
+        bio_tex = float(np.std(lap_abs)) if lap_abs.size > 0 else 0.0
+        symptoms["texture_bio"] = min(100.0, bio_tex / 1.5)
+
+        # === Score global ===
+        sig_count = 0
+        if symptoms["chlorose"]    >  6.0: sig_count += 1
+        if symptoms["rouille"]     >  2.5: sig_count += 1
+        if symptoms["necrose"]     >  4.0: sig_count += 1
+        if symptoms["sec"]         >  8.0: sig_count += 1
+        if symptoms["mildiou"]     >  4.0: sig_count += 1
+        if symptoms["mosaique"]    > 10.0: sig_count += 1
+        if symptoms["nervures"]    >  1.5: sig_count += 1
+        if symptoms["taches_bio"]  >  0.0: sig_count += 1
+        if veg_percent             > 12.0: sig_count += 1
+
+        disease_pattern_score = min(100.0,
+                sig_count * 13.0
+                + min(22.0, veg_percent * 0.38)
+                + min(15.0, symptoms["nervures"] * 1.6)
+                + min(10.0, symptoms["texture_bio"] * 0.12)
+        )
+
+        return (
+                round(disease_pattern_score, 2),
+                round(veg_percent, 2),
+                {k: round(v, 2) for k, v in symptoms.items()},
+        )
+
+
 def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict[str, object]:
         """Validation feuille agricole — système simple et stable.
 
@@ -1040,7 +1158,7 @@ def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict
         shape_score = max(0.0, min(100.0, shape_score))
 
         # ──────────────────────────────────────────────────────────────
-        # C. INDICE COULEUR (10%) — vert NON exige
+        # C. INDICE COULEUR (5%) — vert NON exige, jaune/brun acceptes
         # Penalise uniquement les tons clairement non vegetaux.
         # ──────────────────────────────────────────────────────────────
         mask_natural = (
@@ -1069,18 +1187,40 @@ def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict
         )) / total_pixels
 
         # ──────────────────────────────────────────────────────────────
+        # D. SCORE SYMPTOMES AGRICOLES (35%)
+        # Chlorose, rouille, necrose, zones seches, mildiou, nervures,
+        # taches biologiques — boostent le score si feuille malade.
+        # Un objet artificiel n'a aucun de ces patterns.
+        # ──────────────────────────────────────────────────────────────
+        disease_pattern_score, veg_percent_broad, symptom_details = _compute_disease_pattern_score(
+                img, hsv, gray, total_pixels
+        )
+
+        # Boost shape_score si symptomes agricoles clairs mais forme ambigue
+        # (cas typique : feuille sur fond blanc → Otsu rectangulaire)
+        if disease_pattern_score >= 35.0 and shape_score < 35.0:
+                shape_score = max(shape_score, 35.0)
+                shape_note  = shape_note + " [corrige par symptomes agricoles]"
+
+        # ──────────────────────────────────────────────────────────────
         # SCORE FINAL PONDERE
-        # texture*0.50 + shape*0.40 + color*0.10
+        # texture*0.35 + shape*0.25 + color*0.05 + disease*0.35
+        # La maladie pese autant que la texture — une feuille malade
+        # doit passer meme sans forme parfaite ni couleur verte.
         # ──────────────────────────────────────────────────────────────
         leaf_score = round(
-                texture_score * 0.50 +
-                shape_score   * 0.40 +
-                color_score   * 0.10,
+                texture_score        * 0.35 +
+                shape_score          * 0.25 +
+                color_score          * 0.05 +
+                disease_pattern_score * 0.35,
                 2,
         )
 
         # ──────────────────────────────────────────────────────────────
         # HARD REJECTS — signaux combines uniquement, jamais un seul
+        # Exception : si symptomes agricoles detectes, ne pas rejeter
+        # (une main avec une rouille dessus reste detectee — cas limite,
+        #  mais un vrai rejet imprevu est pire qu'un faux positif rare).
         # ──────────────────────────────────────────────────────────────
         skin_mask = (
                 (hue >= 2) & (hue <= 18) & (sat > 25) & (sat < 160) & (val > 60)
@@ -1088,15 +1228,23 @@ def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict
         pct_skin = 100.0 * float(np.count_nonzero(skin_mask)) / total_pixels
 
         hard_reject = None
-        if pct_skin > 60.0 and texture_score < 35.0 and pct_natural < 18.0:
-                leaf_score  = min(leaf_score, 20.0)
-                hard_reject = f"peau humaine ({pct_skin:.0f}%)"
-        elif is_fabric and fabric_uniform and texture_score < 42.0 and pct_natural < 22.0:
-                leaf_score  = min(leaf_score, 22.0)
-                hard_reject = f"vetement/tissu ({fabric_reason})"
-        elif lap_var < 3.0 and non_unif < 0.05:
-                leaf_score  = min(leaf_score, 12.0)
-                hard_reject = "image vide ou quasi uniforme"
+        disease_override = disease_pattern_score >= 40.0
+
+        if not disease_override:
+                if pct_skin > 60.0 and texture_score < 35.0 and pct_natural < 18.0:
+                        leaf_score  = min(leaf_score, 20.0)
+                        hard_reject = f"peau humaine ({pct_skin:.0f}%)"
+                elif is_fabric and fabric_uniform and texture_score < 42.0 and pct_natural < 22.0:
+                        leaf_score  = min(leaf_score, 22.0)
+                        hard_reject = f"vetement/tissu ({fabric_reason})"
+                elif lap_var < 3.0 and non_unif < 0.05:
+                        leaf_score  = min(leaf_score, 12.0)
+                        hard_reject = "image vide ou quasi uniforme"
+        else:
+                # Rejet minimal : image completement vide reste rejetee
+                if lap_var < 3.0 and non_unif < 0.05:
+                        leaf_score  = min(leaf_score, 12.0)
+                        hard_reject = "image vide ou quasi uniforme"
 
         leaf_score = round(leaf_score, 2)
 
@@ -1110,33 +1258,41 @@ def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict
                 reason = f"Image rejetee — {hard_reject}"
         elif not is_leaf:
                 parts: List[str] = []
-                if texture_score < 25: parts.append(f"texture non organique (Lap={lap_var:.0f})")
-                if shape_score   < 20: parts.append(shape_note)
-                if not parts:          parts.append(f"score global insuffisant ({leaf_score:.0f}/100)")
+                if texture_score < 25:         parts.append(f"texture non organique (Lap={lap_var:.0f})")
+                if shape_score   < 20:         parts.append(shape_note)
+                if disease_pattern_score < 15: parts.append(f"aucun symptome agricole detecte")
+                if not parts:                  parts.append(f"score global insuffisant ({leaf_score:.0f}/100)")
                 reason = "Image rejetee — " + "; ".join(parts)
         elif low_confidence_leaf:
                 reason = f"Feuille probable (confiance limitee) — {shape_note}"
         else:
                 reason = f"Feuille detectee — {shape_note}"
 
+        # ── DEBUG LOGS ──
         print(
-                f"FINAL LEAF SCORE: {leaf_score:.1f}/100 "
-                f"(texture={texture_score:.1f}, shape={shape_score:.1f}, "
-                f"color={color_score:.1f}, veg%={pct_veg:.1f}, nat%={pct_natural:.1f})"
+                f"[LEAF VALIDATION] final_leaf_score={leaf_score:.1f}/100 "
+                f"texture_score={texture_score:.1f} shape_score={shape_score:.1f} "
+                f"color_score={color_score:.1f} disease_pattern_score={disease_pattern_score:.1f} "
+                f"vegetation_score={veg_percent_broad:.1f}% "
+                f"symptoms={symptom_details} "
+                f"is_leaf={is_leaf} reason='{reason}'"
         )
 
         return {
-                "is_leaf":             is_leaf,
-                "low_confidence_leaf": low_confidence_leaf,
-                "leaf_score":          leaf_score,
-                "confidence":          int(leaf_score),
-                "texture_score":       round(texture_score, 1),
-                "shape_score":         round(shape_score,   1),
-                "color_score":         round(color_score,   1),
-                "contour_score":       round(shape_score,   1),
-                "veg_percent":         round(pct_veg,       1),
-                "vein_score":          0.0,
-                "reason":              reason,
+                "is_leaf":                is_leaf,
+                "low_confidence_leaf":    low_confidence_leaf,
+                "leaf_score":             leaf_score,
+                "confidence":             int(leaf_score),
+                "texture_score":          round(texture_score,         1),
+                "shape_score":            round(shape_score,           1),
+                "color_score":            round(color_score,           1),
+                "contour_score":          round(shape_score,           1),
+                "disease_pattern_score":  round(disease_pattern_score, 1),
+                "vegetation_score":       round(veg_percent_broad,     1),
+                "veg_percent":            round(pct_veg,               1),
+                "vein_score":             round(symptom_details.get("nervures", 0.0), 1),
+                "symptom_details":        symptom_details,
+                "reason":                 reason,
         }
 
 

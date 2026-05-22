@@ -1,0 +1,119 @@
+Améliorer la validation des feuilles pour prendre en compte les caractéristiques des maladies agricoles.
+
+PROBLÈME ACTUEL :
+Le système rejette certaines vraies feuilles malades car :
+- elles perdent leur couleur verte
+- elles ressemblent visuellement à des objets
+- elles ont des taches importantes
+- elles sont sèches ou brûlées
+
+OBJECTIF :
+Le système doit reconnaître qu’une feuille malade reste une feuille.
+
+━━━━━━━━━━━━━━━━━━━
+1. VALIDATION INTELLIGENTE
+━━━━━━━━━━━━━━━━━━━
+
+Avant de rejeter une image comme “pas feuille” :
+
+Le système doit vérifier aussi les caractéristiques typiques des maladies végétales.
+
+IMPORTANT :
+Les symptômes agricoles doivent augmenter le score feuille.
+
+━━━━━━━━━━━━━━━━━━━
+2. CARACTÉRISTIQUES À RECONNAÎTRE
+━━━━━━━━━━━━━━━━━━━
+
+Ajouter détection des symptômes suivants :
+
+- chlorose
+- rouille
+- taches circulaires
+- brûlures marginales
+- nervures visibles
+- mildiou
+- mosaïque
+- zones sèches naturelles
+- motifs biologiques irréguliers
+
+Si plusieurs symptômes agricoles sont détectés :
+→ augmenter leaf_score
+
+━━━━━━━━━━━━━━━━━━━
+3. NE PAS CONFONDRE
+━━━━━━━━━━━━━━━━━━━
+
+Le système ne doit plus considérer :
+- absence de vert
+- couleur jaune
+- couleur marron
+- taches importantes
+
+comme preuve que ce n’est pas une feuille.
+
+━━━━━━━━━━━━━━━━━━━
+4. VALIDATION FINALE
+━━━━━━━━━━━━━━━━━━━
+
+Le score final doit combiner :
+
+- structure végétale
+- texture organique
+- nervures
+- symptômes agricoles
+- contours naturels
+
+IMPORTANT :
+Une feuille malade doit pouvoir être validée même avec peu de vert.
+
+━━━━━━━━━━━━━━━━━━━
+5. GARDER LE REJET DES OBJETS
+━━━━━━━━━━━━━━━━━━━
+
+Le système doit toujours rejeter :
+- humains
+- vêtements
+- voitures
+- murs
+- objets artificiels
+
+Mais :
+si des symptômes agricoles cohérents sont détectés,
+la feuille doit être acceptée.
+
+━━━━━━━━━━━━━━━━━━━
+6. AJOUTER LOGS DEBUG
+━━━━━━━━━━━━━━━━━━━
+
+Afficher :
+- disease_pattern_score
+- vegetation_score
+- texture_score
+- final_leaf_score
+
+━━━━━━━━━━━━━━━━━━━
+7. IMPORTANT
+━━━━━━━━━━━━━━━━━━━
+
+Ne pas modifier :
+- interface
+- frontend
+- design
+- arborescence
+
+Modifier uniquement :
+- backend/services/image_analysis.py
+- backend/services/disease_detector.py
+- backend/app.py
+
+━━━━━━━━━━━━━━━━━━━
+8. RÉSULTAT ATTENDU
+━━━━━━━━━━━━━━━━━━━
+
+✅ feuilles malades acceptées
+✅ feuilles jaunes acceptées
+✅ feuilles avec taches acceptées
+✅ objets artificiels rejetés
+✅ humains rejetés
+✅ validation intelligente basée sur les symptômes agricoles

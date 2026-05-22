@@ -178,11 +178,18 @@ def detect():
             logger.info(
                 f"   🌿 Score feuille: {leaf_check.get('leaf_score', 0):.1f}/100 "
                 f"is_leaf={leaf_check['is_leaf']} "
-                f"low_confidence={leaf_check.get('low_confidence_leaf', False)} "
-                f"(texture={leaf_check.get('texture_score', 0):.1f}, "
-                f"shape={leaf_check.get('shape_score', 0):.1f}, "
-                f"color={leaf_check.get('color_score', 0):.1f}, "
-                f"veg={leaf_check.get('veg_percent', 0):.1f}%)"
+                f"low_confidence={leaf_check.get('low_confidence_leaf', False)}"
+            )
+            logger.info(
+                f"   📊 texture_score={leaf_check.get('texture_score', 0):.1f} "
+                f"shape_score={leaf_check.get('shape_score', 0):.1f} "
+                f"color_score={leaf_check.get('color_score', 0):.1f} "
+                f"disease_pattern_score={leaf_check.get('disease_pattern_score', 0):.1f} "
+                f"vegetation_score={leaf_check.get('vegetation_score', 0):.1f}% "
+                f"veg_percent={leaf_check.get('veg_percent', 0):.1f}%"
+            )
+            logger.info(
+                f"   🔬 symptomes={leaf_check.get('symptom_details', {})}"
             )
             if not leaf_check["is_leaf"]:
                 try:
