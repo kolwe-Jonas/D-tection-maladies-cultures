@@ -11,7 +11,7 @@ import cv2
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
-from services.image_analysis import analyze_leaf, optimize_image_for_analysis, compute_leaf_score, validate_plant_match
+from services.image_analysis import analyze_leaf, optimize_image_for_analysis, validate_leaf_image, validate_plant_match
 from services.disease_detector import find_best_match
 
 
@@ -170,19 +170,18 @@ def detect():
 
         # ===== VALIDATION FEUILLE (score global 0-100, 4 critères pondérés) =====
         # Règle : aucun critère seul ne rejette. Seul le score global décide.
-        #   < 45  → rejet (pas une feuille)
-        #   45-64 → feuille probable, analyse autorisée avec warning
-        #   ≥ 65  → feuille valide
+        #   < 40  → rejet (pas une feuille)
+        #   40-59 → feuille probable, analyse autorisée avec warning
+        #   ≥ 60  → feuille valide
         try:
-            leaf_check = compute_leaf_score(image, plant_type=plant_type)
+            leaf_check = validate_leaf_image(image, plant_type=plant_type)
             logger.info(
                 f"   🌿 Score feuille: {leaf_check.get('leaf_score', 0):.1f}/100 "
                 f"is_leaf={leaf_check['is_leaf']} "
                 f"low_confidence={leaf_check.get('low_confidence_leaf', False)} "
-                f"(couleur={leaf_check.get('color_score', 0):.1f}, "
-                f"texture={leaf_check.get('texture_score', 0):.1f}, "
-                f"forme={leaf_check.get('shape_score', 0):.1f}, "
-                f"contours={leaf_check.get('contour_score', 0):.1f}, "
+                f"(texture={leaf_check.get('texture_score', 0):.1f}, "
+                f"shape={leaf_check.get('shape_score', 0):.1f}, "
+                f"color={leaf_check.get('color_score', 0):.1f}, "
                 f"veg={leaf_check.get('veg_percent', 0):.1f}%)"
             )
             if not leaf_check["is_leaf"]:
