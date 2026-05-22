@@ -1207,6 +1207,42 @@ def find_best_match(
         score_diff = (best_score - second_score) * 100.0
 
         raw_confidence_pct = round(best_score * 100.0, 2)
+        plant_conf_val     = float(features.get("_plant_confidence_score", 1.0))
+
+        print(f"Plant detected: {bool(features.get('_is_leaf', True))}")
+        print(f"Plant confidence: {plant_conf_val:.3f}")
+
+        # ── AUCUNE_MALADIE : score brut trop faible → aucune maladie identifiable ──
+        # Supprime tout comportement de fallback (y compris rouille par défaut).
+        # Seuil 35 % : en dessous, le meilleur match n'est pas fiable.
+        if raw_confidence_pct < 35.0:
+                logger.warning(
+                        "AUCUNE_MALADIE: score brut %.1f%% < 35%% — aucune maladie retenue",
+                        raw_confidence_pct,
+                )
+                print(f"Final decision: AUCUNE_MALADIE (raw_confidence={raw_confidence_pct:.1f}% < 35%)")
+                if close_conn:
+                        conn.close()
+                return {
+                        "disease_name":          "AUCUNE_MALADIE",
+                        "scientific_name":       "",
+                        "symptoms":              "Aucune maladie identifiable sur cette image.",
+                        "causes":                "Signal insuffisant pour un diagnostic fiable.",
+                        "treatment":             "Veuillez soumettre une image plus nette d'une feuille végétale.",
+                        "prevention":            "Photographiez la feuille avec un bon éclairage, de près.",
+                        "severity":              "indéterminée",
+                        "urgency":               "Indéterminée — aucun diagnostic possible",
+                        "propagation_risk":      "Indéterminé",
+                        "plant_type":            plant_type_norm or "",
+                        "plant_confidence_score": round(plant_conf_val * 100.0, 2),
+                        "confidence_score":      0.0,
+                        "score_breakdown":       None,
+                        "match_reasons":         ["score brut insuffisant — aucune maladie retenue"],
+                        "disease_pattern":       image_pattern,
+                        "image_pattern":         image_pattern,
+                        "score_difference":      0.0,
+                }
+
         confidence_pct = _normalize_confidence_score(raw_confidence_pct)
         plant_confidence = round(plant_score * 100.0, 2)
 
@@ -1216,6 +1252,8 @@ def find_best_match(
                 confidence_pct,
         )
         _log_winner(best, confidence_pct / 100.0, best_detail, score_diff)
+
+        print(f"Final decision: {best.get('disease_name', '?')} (confidence={confidence_pct:.1f}%)")
 
         if close_conn:
                 conn.close()

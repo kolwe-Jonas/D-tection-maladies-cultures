@@ -236,6 +236,38 @@ def detect():
                     "reason": leaf_check.get("reason", ""),
                 }), 400
 
+            # ── GATE STRICT NON_PLANTE : plant_confidence < 0.75 sans signaux agricoles ──
+            # Un objet avec quelques couleurs brownish peut passer is_leaf=True mais
+            # avoir un score trop faible pour être une vraie plante.
+            # Le seuil 0.75 est appliqué SAUF si des signaux agricoles clairs compensent.
+            plant_confidence_score = round(leaf_check.get("leaf_score", 0.0) / 100.0, 3)
+            disease_pattern_val    = leaf_check.get("disease_pattern_score", 0.0)
+            print(f"Plant detected: {leaf_check.get('is_leaf', False)}")
+            print(f"Plant confidence: {plant_confidence_score:.3f}")
+
+            if plant_confidence_score < 0.75 and disease_pattern_val < 25.0:
+                try:
+                    os.remove(filepath)
+                except Exception:
+                    pass
+                logger.warning(
+                    f"   ❌ NON_PLANTE_DETECTEE — "
+                    f"plant_confidence={plant_confidence_score:.3f} < 0.75, "
+                    f"disease_pattern={disease_pattern_val:.1f} < 25"
+                )
+                print(f"Final decision: NON_PLANTE_DETECTEE")
+                return jsonify({
+                    "success": False,
+                    "is_leaf": False,
+                    "is_plant": False,
+                    "class": "NON_PLANTE_DETECTEE",
+                    "plant_confidence_score": plant_confidence_score,
+                    "error": "❌ Image non végétale détectée. Veuillez photographier une feuille de plante.",
+                    "leaf_score": leaf_check.get("leaf_score", 0),
+                    "disease_pattern_score": disease_pattern_val,
+                    "reason": leaf_check.get("reason", ""),
+                }), 400
+
             # Confiance limitée → warning mais analyse continue
             if leaf_check.get("low_confidence_leaf", False):
                 leaf_warning = (
