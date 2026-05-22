@@ -1752,6 +1752,56 @@ def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict
 
 
 
+def is_plant_image(image: object) -> Dict[str, object]:
+        """Vérifie si une image contient une plante valide avant toute détection de maladie.
+
+        Basé sur validate_leaf_image() — aucun double calcul si appelé seul.
+
+        Retourne:
+                {
+                        "is_plant": bool,
+                        "plant_confidence_score": float (0.0–1.0),
+                        "leaf_score": float,
+                        "vein_score": float,
+                        "disease_pattern_score": float,
+                        "should_reject": bool,
+                        "reason": str,
+                }
+        """
+        result = validate_leaf_image(image)
+
+        leaf_score       = result.get("leaf_score", 0.0)
+        vein_raw         = result.get("vein_score", 0.0)
+        vein_score_norm  = min(100.0, vein_raw * 8.0)
+        texture_bio      = result.get("texture_biological_score", result.get("texture_score", 0.0))
+        disease_pat      = result.get("disease_pattern_score", 0.0)
+
+        raw_confidence = (
+                leaf_score      * 0.50 +
+                vein_score_norm * 0.20 +
+                texture_bio     * 0.15 +
+                disease_pat     * 0.15
+        ) / 100.0
+
+        plant_confidence_score = round(max(0.0, min(1.0, raw_confidence)), 3)
+
+        is_plant = (
+                result.get("is_leaf", False)
+                and not result.get("should_reject", False)
+        )
+
+        return {
+                "is_plant":              is_plant,
+                "should_reject":         result.get("should_reject", False),
+                "plant_confidence_score": plant_confidence_score,
+                "leaf_score":            leaf_score,
+                "vein_score":            vein_raw,
+                "texture_score":         result.get("texture_score", 0.0),
+                "disease_pattern_score": disease_pat,
+                "reason":                result.get("reason", ""),
+        }
+
+
 def validate_plant_match(analysis: Dict, plant_type: str) -> Dict[str, object]:
         """Vérifie la cohérence morphologique entre l'image analysée et le type de plante choisi.
 

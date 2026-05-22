@@ -11,7 +11,7 @@ import cv2
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
-from services.image_analysis import analyze_leaf, optimize_image_for_analysis, validate_leaf_image, validate_plant_match
+from services.image_analysis import analyze_leaf, optimize_image_for_analysis, validate_leaf_image, validate_plant_match, is_plant_image
 from services.disease_detector import find_best_match
 
 
@@ -212,8 +212,32 @@ def detect():
                     "reason": leaf_check.get("reason", ""),
                 }), 400
 
+            # ── GATE OBLIGATOIRE : image non végétale → pipeline bloqué ──
+            # is_leaf=False signifie : score global < 40 ET aucun signal agricole (disease_pattern < 22).
+            # Dans ce cas la détection de maladie ne doit pas s'exécuter.
+            if not leaf_check.get("is_leaf", True):
+                try:
+                    os.remove(filepath)
+                except Exception:
+                    pass
+                logger.warning(
+                    f"   ❌ Image non végétale — pipeline détection bloqué "
+                    f"(leaf_score={leaf_check.get('leaf_score', 0):.1f}, "
+                    f"disease_pattern={leaf_check.get('disease_pattern_score', 0):.1f})"
+                )
+                return jsonify({
+                    "success": False,
+                    "is_leaf": False,
+                    "is_plant": False,
+                    "plant_confidence_score": round(leaf_check.get("leaf_score", 0) / 100.0, 3),
+                    "error": "❌ Image non végétale détectée. Veuillez photographier une feuille de plante.",
+                    "leaf_score": leaf_check.get("leaf_score", 0),
+                    "disease_pattern_score": leaf_check.get("disease_pattern_score", 0),
+                    "reason": leaf_check.get("reason", ""),
+                }), 400
+
             # Confiance limitée → warning mais analyse continue
-            if not leaf_check.get("is_leaf", True) or leaf_check.get("low_confidence_leaf", False):
+            if leaf_check.get("low_confidence_leaf", False):
                 leaf_warning = (
                     "⚠️ Image de qualité limitée — la feuille n'est pas clairement identifiée. "
                     "Le résultat peut être moins précis."
@@ -233,6 +257,13 @@ def detect():
             logger.info("   🔍 Analyse de l'image en cours...")
             analysis = analyze_leaf(image)
             analysis['plant_type'] = plant_type
+            # Enrichir l'analyse avec les scores de validation plante
+            # pour que disease_detector puisse les utiliser comme garde
+            analysis['_leaf_score'] = leaf_check.get('leaf_score', 100.0)
+            analysis['_is_leaf'] = leaf_check.get('is_leaf', True)
+            analysis['_plant_confidence_score'] = round(
+                leaf_check.get('leaf_score', 100.0) / 100.0, 3
+            )
             logger.info("   ✓ Analyse complétée")
             logger.info("     - Couleur dominante: %s", analysis.get("dominant_color_name", "N/A"))
             logger.info("     - Zones affectées: %s%%", analysis.get("percent_unhealthy", "N/A"))

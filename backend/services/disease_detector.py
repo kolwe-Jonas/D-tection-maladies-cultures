@@ -1033,6 +1033,63 @@ def _log_winner(best: Dict, best_score: float, detail: Dict, score_diff: float) 
                 logger.info("  Score final après pénalités : %.1f%%", bd["final"] * 100)
 
 
+def _verify_rust_signals(features: Dict) -> bool:
+        """Vérifie que l'image présente de vrais signaux de rouille biologiques.
+
+        Conditions CUMULATIVES requises pour valider une prédiction rouille :
+        - présence de végétation (couleurs biologiques)
+        - couleurs orange/brun significatives
+        - taches présentes (micro-pustules)
+        - score plante suffisant (si disponible)
+
+        Retourne False si l'image est clairement non végétale ou sans signaux rouille réels.
+        """
+        pct_brun_clair  = float(features.get("percent_brun_clair", 0.0))
+        pct_brun_fonce  = float(features.get("percent_brun_fonce", 0.0))
+        pct_vert_clair  = float(features.get("percent_vert_clair", 0.0))
+        pct_vert_fonce  = float(features.get("percent_vert_fonce", 0.0))
+        spot_count      = float(features.get("spot_count", 0.0))
+        pct_unhealthy   = float(features.get("percent_unhealthy", 0.0))
+        plant_conf      = float(features.get("_plant_confidence_score", 1.0))
+        leaf_score      = float(features.get("_leaf_score", 100.0))
+
+        # 1. Score plante trop bas → image non végétale → rouille impossible
+        if plant_conf < 0.30 or leaf_score < 30.0:
+                logger.warning(
+                        "RUST GUARD: score plante trop bas (conf=%.2f, leaf=%.1f) — rouille bloquée",
+                        plant_conf, leaf_score,
+                )
+                return False
+
+        # 2. Aucune végétation → rouille impossible
+        veg_total = pct_vert_clair + pct_vert_fonce + pct_brun_clair + pct_brun_fonce
+        if veg_total < 4.0 and pct_unhealthy < 6.0:
+                logger.warning(
+                        "RUST GUARD: aucune végétation détectée (veg=%.1f%%) — rouille bloquée",
+                        veg_total,
+                )
+                return False
+
+        # 3. Aucune couleur orange/brun → pustules rouille impossibles
+        rust_color = pct_brun_clair + pct_brun_fonce
+        if rust_color < 2.0:
+                logger.warning(
+                        "RUST GUARD: aucune couleur brun/orange (%.1f%%) — rouille bloquée",
+                        rust_color,
+                )
+                return False
+
+        # 4. Aucune tache détectée → pas de pustules
+        if spot_count < 2.0 and pct_unhealthy < 5.0:
+                logger.warning(
+                        "RUST GUARD: aucune tache/pustule (spots=%d, unhealthy=%.1f%%) — rouille bloquée",
+                        int(spot_count), pct_unhealthy,
+                )
+                return False
+
+        return True
+
+
 def find_best_match(
         features: Dict,
         conn: sqlite3.Connection = None,
@@ -1098,6 +1155,38 @@ def find_best_match(
                         scored = scored_norm
 
         scored.sort(key=lambda item: item[1], reverse=True)
+
+        # ── GARDE ANTI-FAUX-POSITIF ROUILLE ──────────────────────────────────
+        # Si la maladie gagnante est "rouille" mais que les signaux biologiques
+        # ne valident pas ce diagnostic → descendre sa note et re-trier.
+        if scored:
+                top_disease, top_score, top_detail = scored[0]
+                if top_detail.get("pattern") == "rust":
+                        if not _verify_rust_signals(features):
+                                penalized_score = top_score * 0.40
+                                logger.warning(
+                                        "RUST GUARD: rouille pénalisée (%.1f%% → %.1f%%) — "
+                                        "signaux biologiques insuffisants",
+                                        top_score * 100, penalized_score * 100,
+                                )
+                                scored[0] = (top_disease, _clamp01(penalized_score), top_detail)
+                                scored.sort(key=lambda item: item[1], reverse=True)
+
+        # ── GARDE GLOBALE NON-VÉGÉTAL ─────────────────────────────────────────
+        # Si le score plante passé dans les features est trop bas,
+        # aucune maladie ne doit être retournée avec confiance élevée.
+        plant_conf_score = float(features.get("_plant_confidence_score", 1.0))
+        leaf_sc = float(features.get("_leaf_score", 100.0))
+        if plant_conf_score < 0.30 or leaf_sc < 30.0:
+                logger.warning(
+                        "NON-VEGETAL GUARD: image non végétale dans find_best_match "
+                        "(plant_conf=%.2f, leaf_score=%.1f) — confiance plafonnée à 50%%",
+                        plant_conf_score, leaf_sc,
+                )
+                scored = [
+                        (d, min(s, 0.45), det)
+                        for d, s, det in scored
+                ]
 
         # Debug log : tous les scores pour comparer
         disease_scores = {
