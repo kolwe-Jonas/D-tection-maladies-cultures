@@ -488,14 +488,18 @@ def _build_expected_profile(pattern: str, disease: Dict) -> Dict[str, Tuple[floa
                         "percent_unhealthy": (5.0, 35.0),
                 },
                 "rust": {
-                        "percent_brun_clair": (10.0, 40.0),
-                        "percent_jaune_pale": (3.0, 25.0),
-                        "spot_count": (8.0, 120.0),
-                        "spot_mean_circularity": (0.35, 0.95),
-                        "spot_mean_area": (8.0, 500.0),
-                        "spot_density": (12.0, 50.0),
-                        "spot_edge_percent": (25.0, 90.0),
-                        "texture_roughness": (12.0, 50.0),
+                        # Rouille : orange-brun dominant + micro-pustules nombreuses
+                        "percent_brun_clair": (8.0, 50.0),
+                        "percent_brun_fonce": (3.0, 25.0),
+                        "percent_jaune_pale": (2.0, 30.0),
+                        "spot_count": (5.0, 200.0),      # nombreuses micro-pustules
+                        "spot_mean_circularity": (0.30, 0.95),  # pustules rondes à ovales
+                        "spot_mean_area": (4.0, 600.0),  # micro-pustules (très petites)
+                        "spot_median_area": (3.0, 300.0),
+                        "spot_density": (8.0, 60.0),
+                        "spot_edge_percent": (20.0, 95.0),  # souvent sur toute la surface
+                        "spot_cluster_score": (30.0, 90.0),  # dispersées mais denses
+                        "texture_roughness": (8.0, 55.0),
                         "percent_unhealthy": unhealthy,
                 },
                 "powdery": {
@@ -579,8 +583,18 @@ def _detect_image_pattern(features: Dict) -> str:
         if pct_yellow >= 18.0 and pct_brown < 12.0 and spot_count <= 6:
                 return "chlorosis"
 
-        # Rouille : nombreuses petites taches, densité modérée-élevée
+        # Rouille : nombreuses petites taches orange/brun, densité modérée-élevée
+        # Détection élargie : aussi sur brun_clair important + nombreuses micro-taches
+        pct_brun_clair_r = float(features.get("percent_brun_clair", 0))
+        pct_brun_fonce_r = float(features.get("percent_brun_fonce", 0))
+        rust_color_signal = pct_brun_clair_r + pct_brun_fonce_r
         if spot_count >= 8 and spot_density >= 10.0 and float(features.get("spot_edge_percent", 0)) >= 20.0:
+                return "rust"
+        # Rouille par couleur orange-brun dominant + micro-taches (pustules typiques)
+        if rust_color_signal >= 15.0 and spot_count >= 5 and spot_density >= 6.0:
+                return "rust"
+        # Rouille : fort brun sans taches nettes (stade avancé)
+        if pct_brun_clair_r >= 20.0 and pct_brown >= 12.0 and texture_roughness >= 10.0:
                 return "rust"
 
         # Flétrissement : jaunissement + sécheresse, peu de taches
@@ -845,6 +859,27 @@ def _score_for_disease(features: Dict, disease: Dict) -> Tuple[float, Dict[str, 
                 },
         }
 
+        # --- Bonus visuel spécifique rouille ---
+        # La rouille du maïs a une signature couleur orange/brun très distinctive.
+        # Si la maladie DB est rouille ET que l'image montre ces couleurs + micro-taches
+        # → on booste le score pour compenser les critères généraux moins discriminants.
+        rust_visual_bonus = 0.0
+        if pattern == "rust":
+                pct_bc = float(features.get("percent_brun_clair", 0))
+                pct_bf = float(features.get("percent_brun_fonce", 0))
+                s_count = float(features.get("spot_count", 0))
+                s_dens  = float(features.get("spot_density", 0))
+                rust_color_present = (pct_bc + pct_bf) >= 10.0
+                rust_spots_present = s_count >= 5 and s_dens >= 6.0
+                if rust_color_present and rust_spots_present:
+                        rust_visual_bonus = min(0.12, (pct_bc + pct_bf) * 0.004 + s_dens * 0.002)
+                        reasons.append(
+                                f"bonus visuel rouille : brun={pct_bc+pct_bf:.1f}%, "
+                                f"taches={s_count:.0f} (densité={s_dens:.1f}%)"
+                        )
+                elif rust_color_present:
+                        rust_visual_bonus = min(0.06, (pct_bc + pct_bf) * 0.002)
+
         # --- Score pondéré ---
         weighted = (
                 CRITERION_WEIGHTS["db_profile"] * db_score
@@ -858,6 +893,7 @@ def _score_for_disease(features: Dict, disease: Dict) -> Tuple[float, Dict[str, 
                 + CRITERION_WEIGHTS["severity"] * severity_score
                 + CRITERION_WEIGHTS["veins"] * vein_score
         )
+        weighted = _clamp01(weighted + rust_visual_bonus)
 
         penalty, penalty_reasons = _anti_confusion_penalty(features, pattern, image_pattern)
         final_score = _clamp01(weighted - penalty)

@@ -792,7 +792,6 @@ def _detect_fabric_pattern(gray: np.ndarray, total_pixels: float) -> Tuple[bool,
 
         Retourne (is_fabric, reason).
         """
-        # Normalise et passe en float32
         f_img = np.float32(gray) / 255.0
         dft = np.fft.fft2(f_img)
         dft_shift = np.fft.fftshift(dft)
@@ -800,24 +799,259 @@ def _detect_fabric_pattern(gray: np.ndarray, total_pixels: float) -> Tuple[bool,
 
         h, w = gray.shape
         cy, cx = h // 2, w // 2
-
-        # Masquer le composant DC (centre) pour ne regarder que la périodicité
         mask_radius = max(5, min(h, w) // 12)
         ys, xs = np.ogrid[:h, :w]
         dc_mask = ((ys - cy) ** 2 + (xs - cx) ** 2) <= mask_radius ** 2
         mag_no_dc = magnitude.copy()
         mag_no_dc[dc_mask] = 0.0
 
-        # Top-N pics non-DC
         flat = mag_no_dc.flatten()
         top_n = min(20, len(flat))
         top_vals = np.partition(flat, -top_n)[-top_n:]
         peak_ratio = float(np.mean(top_vals)) / (float(np.mean(magnitude)) + 1e-6)
 
-        # Tissu = peaks FFT très élevés (périodicité), ratio > 15
         is_fabric = peak_ratio > 15.0
         reason = f"tissu détecté (FFT peak_ratio={peak_ratio:.1f})" if is_fabric else f"texture apériodique (peak_ratio={peak_ratio:.1f})"
         return is_fabric, reason
+
+
+# ---------------------------------------------------------------------------
+# Analyse couleur naturelle vs artificielle
+# ---------------------------------------------------------------------------
+
+def _analyze_color_naturalness(
+        img: np.ndarray, hsv: np.ndarray, gray: np.ndarray, total_pixels: float
+) -> Tuple[float, Dict[str, float]]:
+        """Analyse la naturalité de la distribution des couleurs.
+
+        Objets artificiels : couleurs séparées en blocs nets, transitions brutales,
+        couleurs synthétiques (bleu vif, violet, rouge pur, plastique).
+        Feuilles malades : transitions naturelles, dégradés biologiques,
+        mélanges vert/jaune/brun organiques, variété chromatique modérée.
+
+        Retourne (natural_color_score 0-100, details).
+        """
+        hue = hsv[:, :, 0]
+        sat = hsv[:, :, 1]
+        val = hsv[:, :, 2]
+        details: Dict[str, float] = {}
+
+        # 1. Couleurs synthétiques/artificielles (bleu vif, violet, rose neon, rouge pur)
+        synthetic = (
+                ((hue >= 100) & (hue <= 155) & (sat > 85))
+                | ((hue >= 155) & (sat > 95))
+                | ((hue >= 0)  & (hue <= 3)  & (sat > 165) & (val > 80))
+        ).astype(np.uint8)
+        pct_synthetic = 100.0 * float(np.count_nonzero(synthetic)) / total_pixels
+        details["pct_synthetic"] = round(pct_synthetic, 2)
+
+        # 2. Palette végétale naturelle large (vert, jaune, brun, beige, orange-brun rouille)
+        natural_veg = (
+                (hue >= 7) & (hue <= 102) & (sat > 8) & (val > 12) & (val < 248)
+        ).astype(np.uint8)
+        pct_natural = 100.0 * float(np.count_nonzero(natural_veg)) / total_pixels
+        details["pct_natural"] = round(pct_natural, 2)
+
+        # 3. Transitions de couleur — brutalité des changements de teinte
+        hue_f = hue.astype(np.float32)
+        grad_x = np.abs(np.diff(hue_f, axis=1))
+        grad_y = np.abs(np.diff(hue_f, axis=0))
+        grad_x = np.where(grad_x > 90, 180.0 - grad_x, grad_x)
+        grad_y = np.where(grad_y > 90, 180.0 - grad_y, grad_y)
+        pct_brutal = 100.0 * ((float(np.mean(grad_x > 40)) + float(np.mean(grad_y > 40))) / 2.0)
+        details["pct_brutal_transitions"] = round(pct_brutal, 2)
+
+        # 4. Variance locale de teinte — dégradés naturels vs blocs uniformes
+        hue_blur = cv2.GaussianBlur(hue_f, (0, 0), 5)
+        hue_local_var = float(np.mean((hue_f - hue_blur) ** 2))
+        details["hue_local_var"] = round(hue_local_var, 2)
+
+        # 5. Variété chromatique (nb pics > 2.5% → 1-2 = objet mono-couleur, ≥4 = vivant)
+        hist_hue = np.bincount(hue.flatten(), minlength=180).astype(np.float32)
+        hist_hue /= (hist_hue.sum() + 1e-6)
+        hist_smooth = cv2.GaussianBlur(hist_hue.reshape(1, -1), (1, 9), 0).flatten()
+        n_peaks = int(np.sum(hist_smooth > 0.025))
+        details["n_color_peaks"] = float(n_peaks)
+
+        # 6. Couleurs humaines/plastiques (ton chair uniformes sur grande surface)
+        human_plastic = (
+                ((hue >= 0) & (hue <= 20) & (sat > 15) & (sat < 180) & (val > 55))
+        ).astype(np.uint8)
+        pct_hp = 100.0 * float(np.count_nonzero(human_plastic)) / total_pixels
+        details["pct_human_plastic"] = round(pct_hp, 2)
+
+        # === Score de naturalité ===
+        score = 42.0
+        score += min(30.0, pct_natural * 0.48)
+        score -= min(25.0, pct_synthetic * 2.2)
+        score -= min(18.0, pct_brutal * 0.75)
+        score += min(12.0, hue_local_var * 0.22)
+        score += min(10.0, max(0.0, n_peaks - 2) * 2.2)
+
+        return round(max(0.0, min(100.0, score)), 2), details
+
+
+# ---------------------------------------------------------------------------
+# Analyse texture biologique vs artificielle
+# ---------------------------------------------------------------------------
+
+def _analyze_material_texture(
+        img: np.ndarray, hsv: np.ndarray, gray: np.ndarray, total_pixels: float
+) -> Tuple[float, Dict[str, float]]:
+        """Différencie texture végétale vs tissu vs plastique vs mur vs métal vs peau.
+
+        Score élevé → texture biologique/organique.
+        Score bas   → texture artificielle ou trop uniforme.
+
+        Retourne (biological_texture_score 0-100, details).
+        """
+        hue = hsv[:, :, 0]
+        sat = hsv[:, :, 1]
+        val = hsv[:, :, 2]
+        details: Dict[str, float] = {}
+
+        # A. Rugosité globale (Laplacien)
+        lap = cv2.Laplacian(gray, cv2.CV_64F)
+        lap_var = float(np.var(lap))
+        details["lap_var"] = round(lap_var, 1)
+
+        # B. Variance multi-échelle — un végétal varie différemment selon l'échelle
+        scales: List[float] = []
+        for ksize in [3, 7, 15]:
+                bl = cv2.GaussianBlur(gray, (ksize, ksize), 0)
+                scales.append(float(np.mean(np.abs(gray.astype(np.float32) - bl.astype(np.float32)))))
+        multi_scale_var = float(np.std(scales))
+        details["multi_scale_var"] = round(multi_scale_var, 2)
+
+        # C. Micro-variations biologiques (gradient morphologique 3×3)
+        k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        gradient = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, k3)
+        bio_micro_var = float(np.std(gradient))
+        details["bio_micro_var"] = round(bio_micro_var, 2)
+
+        # D. Surface plate artificielle (plastique, écran, métal poli)
+        val_std = float(np.std(val))
+        pct_specular = 100.0 * float(np.count_nonzero(val > 248)) / total_pixels
+        is_flat = val_std < 22.0 and lap_var < 40.0 and pct_specular < 1.5
+        details["val_std"] = round(val_std, 1)
+        details["is_flat"] = float(is_flat)
+
+        # E. Détecteur peau — teinte chaude + texture lisse + ton uniforme
+        skin = ((hue >= 2) & (hue <= 20) & (sat > 18) & (sat < 175) & (val > 55)).astype(np.uint8)
+        pct_skin = 100.0 * float(np.count_nonzero(skin)) / total_pixels
+        details["pct_skin"] = round(pct_skin, 2)
+
+        # F. Variance locale de luminosité (structure complexe = organique)
+        gray_d = gray.astype(np.float64)
+        sq_mean = cv2.GaussianBlur(gray_d ** 2, (7, 7), 0)
+        mean_sq = cv2.GaussianBlur(gray_d, (7, 7), 0) ** 2
+        local_var = np.maximum(0.0, sq_mean - mean_sq)
+        lv_mean = float(np.mean(local_var))
+        lv_std  = float(np.std(local_var))
+        lv_ratio = lv_std / (lv_mean + 1.0)
+        details["lv_ratio"] = round(lv_ratio, 3)
+
+        # === Score biologique ===
+        bio = 28.0
+        if   lap_var > 250: bio += 24.0
+        elif lap_var > 100: bio += 17.0
+        elif lap_var > 40:  bio += 10.0
+        elif lap_var > 12:  bio += 4.0
+        else:               bio -= 12.0
+
+        bio += min(15.0, bio_micro_var * 0.48)
+        bio += min(13.0, multi_scale_var * 6.5)
+        bio += min(12.0, lv_ratio * 4.2)
+
+        if is_flat:         bio -= 24.0
+        bio -= min(13.0, pct_skin * 0.20)
+
+        return round(max(0.0, min(100.0, bio)), 2), details
+
+
+# ---------------------------------------------------------------------------
+# Analyse contours organiques vs artificiels
+# ---------------------------------------------------------------------------
+
+def _analyze_organic_contours(
+        img: np.ndarray, gray: np.ndarray, total_pixels: float
+) -> Tuple[float, Dict[str, float]]:
+        """Différencie contours organiques (feuille) vs artificiels (objet manufacturé).
+
+        Feuille : bords irréguliers, dentelés, complexité élevée, asymétrie naturelle.
+        Objet   : rectangles, lignes droites, formes géométriques répétées.
+
+        Retourne (organic_contour_score 0-100, details).
+        """
+        details: Dict[str, float] = {}
+
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blurred, 30, 100)
+
+        # A. Lignes droites (Hough) — signature d'objet artificiel
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=40,
+                                minLineLength=30, maxLineGap=10)
+        n_straight = len(lines) if lines is not None else 0
+        total_line_len = 0.0
+        if lines is not None:
+                for ln in lines:
+                        x1, y1, x2, y2 = ln[0]
+                        total_line_len += float(np.hypot(x2 - x1, y2 - y1))
+        pct_straight = min(100.0, 100.0 * total_line_len / (float(np.sqrt(total_pixels)) * 8.0 + 1.0))
+        details["n_straight_lines"] = float(n_straight)
+        details["pct_straight"] = round(pct_straight, 2)
+
+        # B. Contour principal — métriques d'irrégularité organique
+        _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        cnts, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        score = 44.0
+        if cnts:
+                main = max(cnts, key=cv2.contourArea)
+                c_area  = float(cv2.contourArea(main))
+                c_perim = float(cv2.arcLength(main, True))
+                if c_area > 0 and c_perim > 0:
+                        compactness = (4.0 * np.pi * c_area) / (c_perim ** 2)
+                        hull   = cv2.convexHull(main)
+                        h_area = float(cv2.contourArea(hull))
+                        solidity   = c_area / h_area if h_area > 0 else 0.5
+                        complexity = c_perim / (float(np.sqrt(c_area)) + 1e-6)
+
+                        details["compactness"] = round(compactness, 3)
+                        details["solidity"]    = round(solidity, 3)
+                        details["complexity"]  = round(complexity, 2)
+
+                        # Forme géométrique parfaite → artificiel
+                        if compactness > 0.82 and solidity > 0.96:
+                                score -= 32.0
+                        elif compactness > 0.72:
+                                score -= 15.0
+
+                        # Forme organique irrégulière
+                        if 0.10 <= compactness <= 0.80 and 0.38 <= solidity <= 0.96:
+                                score += 22.0
+
+                        # Complexité élevée = dentelures = contour végétal
+                        if   complexity > 18: score += 24.0
+                        elif complexity > 12: score += 15.0
+                        elif complexity > 7:  score += 7.0
+
+        # Pénalité lignes droites
+        score -= min(22.0, pct_straight * 0.42)
+
+        # C. Asymétrie naturelle
+        h, w = gray.shape
+        left_m  = float(np.mean(gray[:, :w//2]))
+        right_m = float(np.mean(gray[:, w//2:]))
+        top_m   = float(np.mean(gray[:h//2, :]))
+        bot_m   = float(np.mean(gray[h//2:, :]))
+        asym = ((abs(left_m - right_m) + abs(top_m - bot_m)) /
+                (left_m + right_m + top_m + bot_m + 1.0))
+        details["asymmetry"] = round(asym, 3)
+        if 0.015 <= asym <= 0.28:
+                score += 9.0
+
+        return round(max(0.0, min(100.0, score)), 2), details
 
 
 def _compute_vein_structure_score(
@@ -877,11 +1111,12 @@ def _compute_disease_pattern_score(
 ) -> Tuple[float, float, Dict[str, float]]:
         """Détecte les motifs de maladies agricoles et retourne un score 0-100.
 
-        Reconnaît : chlorose, rouille, nécrose, zones sèches, mildiou,
-        nervures visibles, taches biologiques, motifs irréguliers.
+        Reconnaît 13 symptômes : chlorose, rouille (pustules orange), nécrose,
+        zones sèches, mildiou/oïdium, mosaïque virale, nervures, taches biologiques,
+        brûlures, trous, jaunissement diffus, lésions irrégulières, texture bio.
 
-        Une feuille malade a presque toujours plusieurs de ces symptômes.
-        Un objet artificiel (vêtement, peau, mur) n'en a aucun.
+        Rouille du maïs : détection avancée orange/brun + micro-pustules + densité.
+        Objets artificiels n'ont aucun de ces signaux.
 
         Retourne (disease_pattern_score, vegetation_percent, symptom_details).
         """
@@ -890,52 +1125,70 @@ def _compute_disease_pattern_score(
         val = hsv[:, :, 2]
         symptoms: Dict[str, float] = {}
 
-        # 1. Chlorose — jaunissement uniforme ou partiel (hue jaune-vert pâle)
+        # 1. Chlorose — jaunissement uniforme ou partiel (jaune-vert pâle, dégradé)
         chlorosis = (
-                (hue >= 15) & (hue <= 45) & (sat > 22) & (val > 70)
+                (hue >= 14) & (hue <= 48) & (sat > 20) & (val > 65)
         ).astype(np.uint8)
         symptoms["chlorose"] = 100.0 * float(np.count_nonzero(chlorosis)) / total_pixels
 
-        # 2. Rouille — taches orange-brun typiques
-        rust = (
-                (hue >= 3) & (hue <= 22) & (sat > 55) & (val > 50) & (val < 200)
+        # 2. Rouille — détection avancée orange-brun typique des pustules
+        #    Plage principale : orange chaud (hue 3-20, sat élevée)
+        rust_core = (
+                (hue >= 3) & (hue <= 20) & (sat > 70) & (val > 55) & (val < 210)
         ).astype(np.uint8)
-        symptoms["rouille"] = 100.0 * float(np.count_nonzero(rust)) / total_pixels
+        #    Plage étendue brun-rouille : inclut les pustules plus sombres
+        rust_ext = (
+                (hue >= 0) & (hue <= 28) & (sat > 50) & (val > 40) & (val < 160)
+        ).astype(np.uint8)
+        rust_combined = np.clip(rust_core.astype(np.uint16) + rust_ext.astype(np.uint16), 0, 1).astype(np.uint8)
+        pct_rust_color = 100.0 * float(np.count_nonzero(rust_combined)) / total_pixels
+        symptoms["rouille"] = pct_rust_color
 
-        # 3. Nécrose / brûlures — brun foncé à noir
+        # 2b. Rouille — micro-pustules dispersées (petites composantes rondes orange/brun)
+        rust_mask_bin = (rust_combined * 255).astype(np.uint8)
+        k_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        rust_mask_clean = cv2.morphologyEx(rust_mask_bin, cv2.MORPH_OPEN, k_dilate)
+        n_rust, _, stats_rust, _ = cv2.connectedComponentsWithStats(rust_mask_clean, connectivity=8)
+        rust_pustules = sum(
+                1 for i in range(1, n_rust)
+                if 4 < stats_rust[i, cv2.CC_STAT_AREA] < 2000
+        )
+        symptoms["rouille_pustules"] = min(100.0, rust_pustules * 5.0)
+
+        # 3. Nécrose / brûlures — brun foncé à noir avec composante biologique
         necrosis = (
-                ((hue >= 0) & (hue <= 22) & (sat > 25) & (val < 110))
-                | (val < 35)
+                ((hue >= 0) & (hue <= 25) & (sat > 22) & (val < 115))
+                | (val < 32)
         ).astype(np.uint8)
         symptoms["necrose"] = 100.0 * float(np.count_nonzero(necrosis)) / total_pixels
 
         # 4. Zones sèches — beige/tan désaturé (feuilles brûlées, sèches)
         dry = (
-                (sat < 68) & (val > 78) & (val < 220) & (hue >= 8) & (hue <= 52)
+                (sat < 70) & (val > 75) & (val < 225) & (hue >= 7) & (hue <= 55)
         ).astype(np.uint8)
         symptoms["sec"] = 100.0 * float(np.count_nonzero(dry)) / total_pixels
 
-        # 5. Mildiou — zones blanchâtres / poudre gris-vert
+        # 5. Mildiou/Oïdium — zones blanchâtres, poudreuses, gris-vert
         mildew = (
-                (sat < 52) & (val > 150) & (hue >= 25) & (hue <= 95)
+                (sat < 55) & (val > 145) & (hue >= 22) & (hue <= 98)
         ).astype(np.uint8)
         symptoms["mildiou"] = 100.0 * float(np.count_nonzero(mildew)) / total_pixels
 
-        # 6. Mosaïque — alternance vert/jaune avec forte variance locale
+        # 6. Mosaïque virale — alternance vert/jaune irrégulière (variance locale élevée)
         mosaic_mask = (
-                ((hue >= 18) & (hue <= 90) & (sat > 18) & (val > 40))
+                (hue >= 16) & (hue <= 92) & (sat > 16) & (val > 38)
         ).astype(np.uint8) * 255
         mosaic_lap = float(cv2.Laplacian(mosaic_mask, cv2.CV_64F).var())
-        symptoms["mosaique"] = min(100.0, mosaic_lap / 80.0)
+        symptoms["mosaique"] = min(100.0, mosaic_lap / 75.0)
 
-        # 7. Tons végétaux larges (inclut feuilles malades jaunes/brunes/sèches)
+        # 7. Tons végétaux larges (inclut feuilles malades jaunes/brunes/sèches/rouillées)
         veg_broad = (
-                ((hue >= 10) & (hue <= 100) & (sat > 12) & (val > 15))
-                | ((hue >= 2) & (hue <= 10) & (sat > 28) & (val > 30))
+                ((hue >= 8)  & (hue <= 102) & (sat > 10) & (val > 12))
+                | ((hue >= 2)  & (hue <= 8)  & (sat > 30) & (val > 28))
         ).astype(np.uint8)
         veg_percent = 100.0 * float(np.count_nonzero(veg_broad)) / total_pixels
 
-        # 8. Nervures visibles — top-hat multi-échelles
+        # 8. Nervures visibles — top-hat multi-échelles (structure vasculaire)
         green_ch = img[:, :, 1]
         k13 = cv2.getStructuringElement(cv2.MORPH_RECT, (13, 13))
         tophat13 = cv2.morphologyEx(green_ch, cv2.MORPH_TOPHAT, k13)
@@ -944,36 +1197,75 @@ def _compute_disease_pattern_score(
         symptoms["nervures"] = vein_pct
 
         # 9. Taches biologiques irrégulières (composantes sombres de taille cohérente)
-        dark_spots = (val < 85).astype(np.uint8) * 255
+        dark_spots = (val < 88).astype(np.uint8) * 255
         n_comp, _, stats_spots, _ = cv2.connectedComponentsWithStats(dark_spots, connectivity=8)
-        circular_spots = sum(
+        bio_spots = sum(
                 1 for i in range(1, n_comp)
-                if 18 < stats_spots[i, cv2.CC_STAT_AREA] < 6000
+                if 15 < stats_spots[i, cv2.CC_STAT_AREA] < 7000
         )
-        symptoms["taches_bio"] = min(100.0, circular_spots * 7.0)
+        symptoms["taches_bio"] = min(100.0, bio_spots * 6.5)
 
-        # 10. Texture biologique — std du gradient (irrégularité organique)
+        # 10. Texture biologique — irrégularité organique (std du gradient Laplacien)
         lap_abs = np.abs(cv2.Laplacian(gray, cv2.CV_64F))
         bio_tex = float(np.std(lap_abs)) if lap_abs.size > 0 else 0.0
-        symptoms["texture_bio"] = min(100.0, bio_tex / 1.5)
+        symptoms["texture_bio"] = min(100.0, bio_tex / 1.4)
 
-        # === Score global ===
+        # 11. Brûlures / lésions marginales (zones très sombres sur bords)
+        dark_border = (val < 60).astype(np.uint8) * 255
+        h_img, w_img = gray.shape
+        border_w = max(3, min(h_img, w_img) // 10)
+        border_zone = np.zeros_like(dark_border)
+        border_zone[:border_w, :]  = 255
+        border_zone[-border_w:, :] = 255
+        border_zone[:, :border_w]  = 255
+        border_zone[:, -border_w:] = 255
+        burned_border = cv2.bitwise_and(dark_border, border_zone)
+        symptoms["brulures"] = 100.0 * float(np.count_nonzero(burned_border)) / total_pixels
+
+        # 12. Jaunissement diffus global (chlorose avancée ou sénescence)
+        yellow_diffuse = (
+                (hue >= 18) & (hue <= 42) & (sat > 35) & (val > 80)
+        ).astype(np.uint8)
+        symptoms["jaunissement"] = 100.0 * float(np.count_nonzero(yellow_diffuse)) / total_pixels
+
+        # 13. Lésions irrégulières — composite brun+sombre+jaune (spectre maladie large)
+        irregular_lesion = np.clip(
+                (rust_core.astype(np.uint16)
+                 + (((hue >= 0) & (hue <= 30) & (sat > 30) & (val < 130)).astype(np.uint16))
+                 + (((hue >= 14) & (hue <= 50) & (sat > 25) & (val > 60) & (val < 160)).astype(np.uint16))),
+                0, 1
+        ).astype(np.uint8)
+        symptoms["lesions"] = 100.0 * float(np.count_nonzero(irregular_lesion)) / total_pixels
+
+        # ── Score de rouille spécifique (bonus fort si pustules ET couleur) ──
+        rust_score_bonus = 0.0
+        if pct_rust_color > 2.0 and rust_pustules >= 5:
+                rust_score_bonus = min(18.0, pct_rust_color * 1.5 + rust_pustules * 0.8)
+        elif pct_rust_color > 4.0:
+                rust_score_bonus = min(12.0, pct_rust_color * 1.2)
+
+        # === Score global — pondération par signification agricole ===
         sig_count = 0
-        if symptoms["chlorose"]    >  6.0: sig_count += 1
-        if symptoms["rouille"]     >  2.5: sig_count += 1
-        if symptoms["necrose"]     >  4.0: sig_count += 1
-        if symptoms["sec"]         >  8.0: sig_count += 1
-        if symptoms["mildiou"]     >  4.0: sig_count += 1
-        if symptoms["mosaique"]    > 10.0: sig_count += 1
-        if symptoms["nervures"]    >  1.5: sig_count += 1
-        if symptoms["taches_bio"]  >  0.0: sig_count += 1
-        if veg_percent             > 12.0: sig_count += 1
+        if symptoms["chlorose"]        >  5.0: sig_count += 1
+        if symptoms["rouille"]         >  2.0: sig_count += 1
+        if symptoms["rouille_pustules"]>  5.0: sig_count += 1   # pustules = signal fort
+        if symptoms["necrose"]         >  3.5: sig_count += 1
+        if symptoms["sec"]             >  7.0: sig_count += 1
+        if symptoms["mildiou"]         >  3.5: sig_count += 1
+        if symptoms["mosaique"]        >  8.0: sig_count += 1
+        if symptoms["nervures"]        >  1.2: sig_count += 1
+        if symptoms["taches_bio"]      >  0.0: sig_count += 1
+        if symptoms["brulures"]        >  1.5: sig_count += 1
+        if symptoms["jaunissement"]    >  4.0: sig_count += 1
+        if symptoms["lesions"]         >  5.0: sig_count += 1
+        if veg_percent                 > 10.0: sig_count += 1
 
         disease_pattern_score = min(100.0,
-                sig_count * 13.0
-                + min(22.0, veg_percent * 0.38)
-                + min(15.0, symptoms["nervures"] * 1.6)
-                + min(10.0, symptoms["texture_bio"] * 0.12)
+                sig_count * 11.0
+                + min(20.0, veg_percent * 0.35)
+                + min(14.0, symptoms["nervures"] * 1.5)
+                + min(10.0, symptoms["texture_bio"] * 0.11)
+                + rust_score_bonus
         )
 
         return (
@@ -1060,11 +1352,10 @@ def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict
         sat  = hsv[:, :, 1]
         val  = hsv[:, :, 2]
 
-        # ──────────────────────────────────────────────────────────────
-        # A. TEXTURE ORGANIQUE (50%)
-        # Matiere vivante = irreguliere, complexe, entropie tonale elevee.
-        # Plancher releve pour photos floues de mobile.
-        # ──────────────────────────────────────────────────────────────
+        # ═══════════════════════════════════════════════════════════════
+        # A. TEXTURE BIOLOGIQUE (25%)
+        #    Matière vivante = irrégulière, multi-échelle, entropie élevée.
+        # ═══════════════════════════════════════════════════════════════
         lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
         block = 16
@@ -1097,22 +1388,31 @@ def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict
         if is_fabric and fabric_uniform:
                 texture_score *= 0.50
 
-        texture_score = max(0.0, min(100.0, texture_score))
+        # Analyse texture biologique avancée (nouveau)
+        texture_biological_score, tex_bio_details = _analyze_material_texture(
+                img, hsv, gray, total_pixels
+        )
+        # Fusion : texture classique + texture biologique avancée
+        texture_score_final = max(0.0, min(100.0,
+                texture_score * 0.60 + texture_biological_score * 0.40
+        ))
 
-        # ──────────────────────────────────────────────────────────────
-        # B. FORME & CONTOURS ORGANIQUES (40%)
-        # Formes biologiques irregulieres = score eleve.
-        # Rectangle / cercle parfait = artificiel = score bas.
-        # ──────────────────────────────────────────────────────────────
+        # ═══════════════════════════════════════════════════════════════
+        # B. CONTOURS ORGANIQUES (20%)
+        #    Formes irrégulières = végétal. Géométriques = artificiel.
+        # ═══════════════════════════════════════════════════════════════
+        organic_contour_score, contour_details = _analyze_organic_contours(
+                img, gray, total_pixels
+        )
+
+        # Score forme classique (conservé pour shape_note et compatibilité)
         blurred     = cv2.GaussianBlur(gray, (9, 9), 0)
         _, thresh_b = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         cnts, _     = cv2.findContours(thresh_b, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        shape_score  = 45.0
+        shape_score  = organic_contour_score   # utilise le nouveau score directement
         shape_note   = "forme indeterminee"
         coverage_val = 0.0
-        c_area       = 0.0
-        c_perim      = 0.0
 
         if cnts:
                 lc           = max(cnts, key=cv2.contourArea)
@@ -1121,48 +1421,34 @@ def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict
                 coverage_val = c_area / total_pixels
 
                 if coverage_val < 0.02:
-                        shape_score = 35.0
-                        shape_note  = f"objet tres petit ({coverage_val*100:.1f}%)"
+                        shape_note = f"objet tres petit ({coverage_val*100:.1f}%)"
                 elif c_perim > 0:
                         hull   = cv2.convexHull(lc)
                         h_area = float(cv2.contourArea(hull))
                         sol    = c_area / h_area if h_area > 0 else 0.5
                         cpt    = (4.0 * np.pi * c_area) / (c_perim ** 2)
+                        complexity = c_perim / (float(np.sqrt(c_area)) + 1e-6)
 
                         if sol > 0.97 and cpt > 0.75:
-                                shape_score = 12.0
-                                shape_note  = f"forme rectangulaire (sol={sol:.2f})"
+                                shape_note = f"forme rectangulaire (sol={sol:.2f})"
                         elif cpt > 0.88:
-                                shape_score = 16.0
-                                shape_note  = f"forme circulaire (cpt={cpt:.2f})"
+                                shape_note = f"forme circulaire (cpt={cpt:.2f})"
                         elif 0.40 <= sol <= 0.97 and cpt < 0.85:
-                                base = 65.0
-                                if 0.50 <= sol <= 0.93:  base += 15.0
-                                if coverage_val >= 0.20: base += 10.0
-                                elif coverage_val >= 0.08: base += 5.0
-                                if cpt < 0.45:           base += 8.0
-                                shape_score = min(100.0, base)
-                                shape_note  = f"forme organique (sol={sol:.2f}, cpt={cpt:.2f})"
+                                shape_note = f"forme organique (sol={sol:.2f}, cpt={cpt:.2f})"
                         elif sol > 0.97 and cpt <= 0.75:
-                                shape_score = 58.0
-                                shape_note  = f"forme allongee (sol={sol:.2f})"
+                                shape_note = f"forme allongee (sol={sol:.2f})"
                         else:
-                                shape_score = 40.0
-                                shape_note  = f"forme ambigue (sol={sol:.2f}, cpt={cpt:.2f})"
+                                shape_note = f"forme ambigue (sol={sol:.2f}, cpt={cpt:.2f})"
 
-                        complexity = c_perim / (float(np.sqrt(c_area)) + 1e-6)
-                        if complexity > 10:  shape_score = min(100.0, shape_score + 12.0)
-                        elif complexity > 6: shape_score = min(100.0, shape_score + 6.0)
+        # ═══════════════════════════════════════════════════════════════
+        # C. DISTRIBUTION COULEUR NATURELLE (10%)
+        #    Couleurs végétales vs synthétiques/artificielles.
+        # ═══════════════════════════════════════════════════════════════
+        natural_color_score, color_nat_details = _analyze_color_naturalness(
+                img, hsv, gray, total_pixels
+        )
 
-        if 0.02 <= coverage_val < 0.12:
-                shape_score = max(shape_score, 42.0)
-
-        shape_score = max(0.0, min(100.0, shape_score))
-
-        # ──────────────────────────────────────────────────────────────
-        # C. INDICE COULEUR (5%) — vert NON exige, jaune/brun acceptes
-        # Penalise uniquement les tons clairement non vegetaux.
-        # ──────────────────────────────────────────────────────────────
+        # Score couleur classique (compatibilité)
         mask_natural = (
                 ((hue >= 8) & (hue <= 96))
                 | ((hue >= 0) & (hue <= 10) & (sat < 110))
@@ -1179,8 +1465,11 @@ def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict
         pct_natural    = 100.0 * float(np.count_nonzero(mask_natural))    / total_pixels
         pct_artificial = 100.0 * float(np.count_nonzero(mask_artificial)) / total_pixels
 
-        color_score = min(100.0, pct_natural * (100.0 / 50.0))
-        color_score = max(0.0, color_score - pct_artificial * 1.5)
+        color_score = max(0.0, min(100.0,
+                pct_natural * (100.0 / 50.0) - pct_artificial * 1.5
+        ))
+        # Fusion couleur classique + naturalité avancée
+        color_score_final = color_score * 0.45 + natural_color_score * 0.55
 
         pct_veg = 100.0 * float(np.count_nonzero(
                 ((hue >= 22) & (hue <= 92) & (sat > 15) & (val > 15))
@@ -1188,76 +1477,94 @@ def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict
                 | ((hue >= 4)  & (hue <= 25) & (sat > 15) & (val > 10))
         )) / total_pixels
 
-        # ──────────────────────────────────────────────────────────────
-        # D. SCORE SYMPTOMES AGRICOLES (35%)
-        # Chlorose, rouille, necrose, zones seches, mildiou, nervures,
-        # taches biologiques — boostent le score si feuille malade.
-        # Un objet artificiel n'a aucun de ces patterns.
-        # ──────────────────────────────────────────────────────────────
+        # ═══════════════════════════════════════════════════════════════
+        # D. SYMPTÔMES AGRICOLES (35%)
+        #    Chlorose, rouille (pustules), nécrose, mildiou, mosaïque,
+        #    nervures, taches biologiques, brûlures — 13 signaux.
+        #    Objet artificiel → score = 0.
+        # ═══════════════════════════════════════════════════════════════
         disease_pattern_score, veg_percent_broad, symptom_details = _compute_disease_pattern_score(
                 img, hsv, gray, total_pixels
         )
 
-        # Boost shape_score si symptomes agricoles clairs mais forme ambigue
-        # (cas typique : feuille sur fond blanc → Otsu rectangulaire)
-        if disease_pattern_score >= 35.0 and shape_score < 35.0:
-                shape_score = max(shape_score, 35.0)
-                shape_note  = shape_note + " [corrige par symptomes agricoles]"
+        # ═══════════════════════════════════════════════════════════════
+        # E. STRUCTURE VÉGÉTALE (10%)
+        #    Largeur de palette végétale (inclut feuilles malades).
+        # ═══════════════════════════════════════════════════════════════
+        vegetation_structure_score = min(100.0, veg_percent_broad * 1.8)
 
-        # ──────────────────────────────────────────────────────────────
-        # SCORE FINAL PONDERE
-        # texture*0.35 + shape*0.25 + color*0.05 + disease*0.35
-        # La maladie pese autant que la texture — une feuille malade
-        # doit passer meme sans forme parfaite ni couleur verte.
-        # ──────────────────────────────────────────────────────────────
+        # Boost shape si symptômes agricoles clairs (feuille sur fond blanc)
+        if disease_pattern_score >= 30.0 and organic_contour_score < 35.0:
+                shape_note = shape_note + " [corrige par symptomes agricoles]"
+
+        # ═══════════════════════════════════════════════════════════════
+        # SCORE FINAL PONDÉRÉ — 5 composantes
+        # texture_bio   25%  : matière biologique vs artificielle
+        # contour_org   20%  : forme organique vs géométrique
+        # couleur_nat   10%  : palette végétale vs synthétique
+        # maladie        35% : signaux agricoles (rouille, chlorose, etc.)
+        # végétation     10% : spectre végétal large (feuilles malades)
+        # ═══════════════════════════════════════════════════════════════
         leaf_score = round(
-                texture_score        * 0.35 +
-                shape_score          * 0.25 +
-                color_score          * 0.05 +
-                disease_pattern_score * 0.35,
+                texture_score_final      * 0.25 +
+                organic_contour_score    * 0.20 +
+                color_score_final        * 0.10 +
+                disease_pattern_score    * 0.35 +
+                vegetation_structure_score * 0.10,
                 2,
         )
 
-        # ──────────────────────────────────────────────────────────────
-        # DÉCISION DE REJET STRICT — seulement les cas évidement non-feuille
-        # Trois critères, chacun nécessite la COMBINAISON de plusieurs signaux
-        # ET l'absence de tout contenu biologique / agricole.
-        # ──────────────────────────────────────────────────────────────
+        # ═══════════════════════════════════════════════════════════════
+        # REJET STRICT — 5 cas inutilisables (signaux COMBINÉS uniquement)
+        # ═══════════════════════════════════════════════════════════════
         skin_mask = (
                 (hue >= 2) & (hue <= 18) & (sat > 25) & (sat < 160) & (val > 60)
         ).astype(np.uint8)
         pct_skin = 100.0 * float(np.count_nonzero(skin_mask)) / total_pixels
 
+        pct_synthetic = color_nat_details.get("pct_synthetic", 0.0)
+
         hard_reject = None
 
-        # 1. Image vide / couleur uniforme (vraiment rien à analyser)
+        # 1. Image vide / uniforme (rien à analyser)
         if lap_var < 2.0 and non_unif < 0.03:
                 hard_reject = "image vide ou quasi uniforme"
 
-        # 2. Corps humain très dominant + aucun contenu agricole
-        elif pct_skin > 75.0 and disease_pattern_score < 15.0 and texture_score < 28.0:
+        # 2. Peau humaine très dominante + zéro contenu agricole
+        elif pct_skin > 75.0 and disease_pattern_score < 12.0 and texture_biological_score < 26.0:
                 hard_reject = f"peau humaine dominante ({pct_skin:.0f}%) sans contenu agricole"
 
-        # 3. Tissu/vêtement très confirmé + aucun contenu biologique
-        elif is_fabric and fabric_uniform and disease_pattern_score < 15.0 and veg_percent_broad < 6.0:
+        # 3. Tissu/vêtement confirmé FFT + aucun signal biologique
+        elif is_fabric and fabric_uniform and disease_pattern_score < 12.0 and veg_percent_broad < 5.0:
                 hard_reject = f"vetement/tissu artificiel ({fabric_reason}) sans contenu biologique"
 
+        # 4. Objet synthétique pur (plastique, écran, voiture) — couleur + texture plate + géom.
+        elif (pct_synthetic > 55.0
+              and tex_bio_details.get("is_flat", 0) > 0
+              and disease_pattern_score < 10.0
+              and organic_contour_score < 22.0):
+                hard_reject = f"objet synthetique ({pct_synthetic:.0f}% couleurs artificielles, surface plate)"
+
+        # 5. Forme géométrique pure + aucun signal biologique (mur, téléphone, papier)
+        elif (contour_details.get("compactness", 0.5) > 0.85
+              and contour_details.get("solidity", 0.5) > 0.97
+              and disease_pattern_score < 10.0
+              and veg_percent_broad < 4.0):
+                hard_reject = "forme geometrique artificielle sans contenu biologique"
+
         if hard_reject:
-                leaf_score = min(leaf_score, 15.0)
+                leaf_score = min(leaf_score, 14.0)
 
         leaf_score = round(leaf_score, 2)
 
-        # ──────────────────────────────────────────────────────────────
+        # ═══════════════════════════════════════════════════════════════
         # DÉCISION FINALE
-        # should_reject  → vrai blocage HTTP 400 (image inutilisable)
-        # is_leaf        → indicateur de confiance (ne bloque plus seul)
-        # low_confidence → avertissement léger, analyse continue
-        # ──────────────────────────────────────────────────────────────
+        # ═══════════════════════════════════════════════════════════════
         should_reject       = hard_reject is not None
         is_leaf             = leaf_score >= 40.0
         low_confidence_leaf = not should_reject and not is_leaf
-        # Feuille probable si symptômes agricoles détectés même score bas
-        if disease_pattern_score >= 25.0 and not should_reject:
+        # Feuille quasi-certaine si signaux agricoles clairs
+        if disease_pattern_score >= 22.0 and not should_reject:
                 is_leaf = True
                 low_confidence_leaf = leaf_score < WARNING
 
@@ -1265,41 +1572,51 @@ def validate_leaf_image(image: object, plant_type: Optional[str] = None) -> Dict
                 reason = f"Image rejetee — {hard_reject}"
         elif not is_leaf:
                 parts: List[str] = []
-                if disease_pattern_score < 15: parts.append("aucun symptome agricole detecte")
-                if texture_score < 20:         parts.append(f"texture tres faible (Lap={lap_var:.0f})")
-                if not parts:                  parts.append(f"score global faible ({leaf_score:.0f}/100)")
-                reason = "Qualite limitee — " + "; ".join(parts)
+                if disease_pattern_score < 12:    parts.append("aucun symptome agricole detecte")
+                if texture_biological_score < 18: parts.append(f"texture non organique (Lap={lap_var:.0f})")
+                if organic_contour_score < 20:    parts.append("contours geometriques/artificiels")
+                if not parts:                     parts.append(f"score global faible ({leaf_score:.0f}/100)")
+                reason = "Image non vegetale — " + "; ".join(parts)
         elif low_confidence_leaf:
                 reason = f"Feuille probable avec confiance limitee — {shape_note}"
         else:
                 reason = f"Feuille detectee — {shape_note}"
 
-        # ── DEBUG LOGS ──
+        # ── DEBUG LOGS (demandés) ──
+        print(f"Disease pattern:              {disease_pattern_score:.1f}")
+        print(f"Texture biological:           {texture_biological_score:.1f}")
+        print(f"Organic contour:              {organic_contour_score:.1f}")
+        print(f"Natural color distribution:   {natural_color_score:.1f}")
+        print(f"Vegetation structure:         {vegetation_structure_score:.1f}")
+        print(f"Final agricultural score:     {leaf_score:.1f}")
         print(
-                f"[LEAF VALIDATION] final_leaf_score={leaf_score:.1f}/100 "
-                f"texture={texture_score:.1f} shape={shape_score:.1f} "
-                f"color={color_score:.1f} disease_pattern={disease_pattern_score:.1f} "
-                f"vegetation={veg_percent_broad:.1f}% "
-                f"is_leaf={is_leaf} should_reject={should_reject} "
-                f"symptoms={symptom_details} reason='{reason}'"
+                f"[LEAF VALIDATION] score={leaf_score:.1f}/100 "
+                f"tex_bio={texture_biological_score:.1f} org_cnt={organic_contour_score:.1f} "
+                f"col_nat={natural_color_score:.1f} disease={disease_pattern_score:.1f} "
+                f"veg={vegetation_structure_score:.1f} "
+                f"is_leaf={is_leaf} should_reject={should_reject} reason='{reason}'"
         )
 
         return {
-                "is_leaf":                is_leaf,
-                "should_reject":          should_reject,
-                "low_confidence_leaf":    low_confidence_leaf,
-                "leaf_score":             leaf_score,
-                "confidence":             int(leaf_score),
-                "texture_score":          round(texture_score,         1),
-                "shape_score":            round(shape_score,           1),
-                "color_score":            round(color_score,           1),
-                "contour_score":          round(shape_score,           1),
-                "disease_pattern_score":  round(disease_pattern_score, 1),
-                "vegetation_score":       round(veg_percent_broad,     1),
-                "veg_percent":            round(pct_veg,               1),
-                "vein_score":             round(symptom_details.get("nervures", 0.0), 1),
-                "symptom_details":        symptom_details,
-                "reason":                 reason,
+                "is_leaf":                   is_leaf,
+                "should_reject":             should_reject,
+                "low_confidence_leaf":       low_confidence_leaf,
+                "leaf_score":                leaf_score,
+                "confidence":                int(leaf_score),
+                "texture_score":             round(texture_score_final,        1),
+                "shape_score":               round(organic_contour_score,      1),
+                "color_score":               round(color_score_final,          1),
+                "contour_score":             round(organic_contour_score,      1),
+                "disease_pattern_score":     round(disease_pattern_score,      1),
+                "vegetation_score":          round(veg_percent_broad,          1),
+                "vegetation_structure_score":round(vegetation_structure_score, 1),
+                "texture_biological_score":  round(texture_biological_score,   1),
+                "organic_contour_score":     round(organic_contour_score,      1),
+                "natural_color_score":       round(natural_color_score,        1),
+                "veg_percent":               round(pct_veg,                    1),
+                "vein_score":                round(symptom_details.get("nervures", 0.0), 1),
+                "symptom_details":           symptom_details,
+                "reason":                    reason,
         }
 
 

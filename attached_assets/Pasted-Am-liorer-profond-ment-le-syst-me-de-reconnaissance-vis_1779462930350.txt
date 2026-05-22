@@ -1,0 +1,228 @@
+Améliorer profondément le système de reconnaissance visuelle agricole afin de :
+
+1. mieux rejeter les objets non végétaux
+2. améliorer fortement la reconnaissance des maladies
+3. gérer les mélanges complexes de couleurs
+4. améliorer la reconnaissance caméra en temps réel
+5. rendre le système plus intelligent sans casser le projet existant
+
+IMPORTANT :
+Ne pas modifier :
+- frontend
+- interface
+- design
+- arborescence
+
+Modifier uniquement :
+- backend/services/image_analysis.py
+- backend/services/disease_detector.py
+- backend/app.py
+
+━━━━━━━━━━━━━━━━━━━
+1. CORRIGER LA RECONNAISSANCE OBJET CAMÉRA
+━━━━━━━━━━━━━━━━━━━
+
+PROBLÈME :
+Depuis la caméra, les objets non végétaux ne sont plus correctement rejetés.
+
+CAUSE POSSIBLE :
+Le système est devenu trop permissif après l’allègement des validations.
+
+CORRECTION :
+Créer une vraie détection multi-critères avant validation feuille.
+
+Le système doit vérifier :
+- cohérence végétale
+- cohérence biologique
+- structure organique
+- distribution naturelle des couleurs
+- texture végétale réelle
+
+Si ces éléments sont absents :
+→ rejeter l’image.
+
+━━━━━━━━━━━━━━━━━━━
+2. ANALYSE DES MÉLANGES DE COULEURS
+━━━━━━━━━━━━━━━━━━━
+
+IMPORTANT :
+Les objets artificiels possèdent souvent :
+- des couleurs très séparées
+- des zones nettes et ordonnées
+- des transitions artificielles
+- des couleurs non naturelles
+
+Créer une analyse spéciale :
+
+Détecter :
+- blocs de couleurs artificiels
+- motifs géométriques
+- séparation brutale des couleurs
+- répétition textile
+- couleurs humaines
+- couleurs plastiques
+- couleurs synthétiques
+
+IMPORTANT :
+Une vraie feuille malade possède :
+- transitions naturelles
+- dégradés biologiques
+- diffusion irrégulière
+- motifs organiques
+- répartition non parfaite
+
+Le système doit apprendre cette différence.
+
+━━━━━━━━━━━━━━━━━━━
+3. ANALYSE AGRICOLE AVANCÉE
+━━━━━━━━━━━━━━━━━━━
+
+Améliorer fortement la reconnaissance des maladies.
+
+Créer une vraie caractérisation des symptômes :
+
+- rouille du maïs
+- chlorose
+- brûlures
+- nécrose
+- mildiou
+- taches fongiques
+- mosaïque
+- zones sèches
+- jaunissement
+- trous biologiques
+- poudre blanche
+- lésions irrégulières
+
+Pour chaque symptôme analyser :
+- couleur exacte
+- taille
+- profondeur visuelle
+- texture locale
+- distribution
+- densité
+- orientation
+- fréquence
+- diffusion naturelle
+
+━━━━━━━━━━━━━━━━━━━
+4. AMÉLIORER LA ROUILLE DU MAÏS
+━━━━━━━━━━━━━━━━━━━
+
+IMPORTANT :
+La rouille du maïs est actuellement mal détectée.
+
+Ajouter :
+- détection orange/brun rouille
+- micro-taches dispersées
+- lésions alignées sur nervures
+- densité de pustules
+- texture poudreuse locale
+- distribution agricole typique du maïs
+
+La rouille doit fortement augmenter le disease_pattern_score.
+
+━━━━━━━━━━━━━━━━━━━
+5. ANALYSE DES TEXTURES
+━━━━━━━━━━━━━━━━━━━
+
+Différencier :
+- texture végétale
+- tissu
+- plastique
+- mur
+- métal
+- peau humaine
+
+Analyser :
+- rugosité naturelle
+- micro-variations biologiques
+- nervures
+- irrégularités végétales
+
+━━━━━━━━━━━━━━━━━━━
+6. ANALYSE DES CONTOURS
+━━━━━━━━━━━━━━━━━━━
+
+Différencier :
+- contours organiques
+- contours artificiels
+
+Détecter :
+- bords végétaux irréguliers
+- dentelures naturelles
+- cassures biologiques
+- asymétrie naturelle
+
+Rejeter :
+- rectangles parfaits
+- lignes droites dominantes
+- formes géométriques artificielles
+
+━━━━━━━━━━━━━━━━━━━
+7. ANALYSE LUMINOSITÉ ET PROFONDEUR
+━━━━━━━━━━━━━━━━━━━
+
+Analyser :
+- zones foncées naturelles
+- sécheresse
+- brûlures
+- profondeur biologique
+- reflets artificiels
+- surfaces plates artificielles
+
+━━━━━━━━━━━━━━━━━━━
+8. SYSTÈME FINAL DE DÉCISION
+━━━━━━━━━━━━━━━━━━━
+
+Le score final doit utiliser :
+
+- disease_pattern_score
+- vegetation_structure_score
+- texture_biological_score
+- organic_contour_score
+- natural_color_distribution_score
+
+IMPORTANT :
+Une vraie maladie agricole doit augmenter la probabilité que ce soit une feuille.
+
+━━━━━━━━━━━━━━━━━━━
+9. REJET STRICT DES OBJETS
+━━━━━━━━━━━━━━━━━━━
+
+Rejeter fortement :
+- vêtements
+- humains
+- objets synthétiques
+- murs
+- téléphones
+- voitures
+
+Même via caméra.
+
+━━━━━━━━━━━━━━━━━━━
+10. AJOUTER LOGS DEBUG
+━━━━━━━━━━━━━━━━━━━
+
+Afficher :
+
+print("Disease pattern:", disease_pattern_score)
+print("Texture biological:", texture_score)
+print("Organic contour:", contour_score)
+print("Natural color distribution:", color_distribution_score)
+print("Vegetation structure:", vegetation_structure_score)
+print("Final agricultural score:", final_score)
+
+━━━━━━━━━━━━━━━━━━━
+11. RÉSULTAT ATTENDU
+━━━━━━━━━━━━━━━━━━━
+
+✅ objets caméra rejetés correctement
+✅ meilleure reconnaissance maladies
+✅ rouille du maïs reconnue
+✅ feuilles malades acceptées
+✅ vêtements rejetés
+✅ humains rejetés
+✅ meilleure analyse des couleurs
+✅ meilleure analyse texture
+✅ reconnaissance agricole beaucoup plus intelligente
