@@ -583,18 +583,22 @@ def _detect_image_pattern(features: Dict) -> str:
         if pct_yellow >= 18.0 and pct_brown < 12.0 and spot_count <= 6:
                 return "chlorosis"
 
-        # Rouille : nombreuses petites taches orange/brun, densité modérée-élevée
-        # Détection élargie : aussi sur brun_clair important + nombreuses micro-taches
+        # Rouille : conditions STRICTES et SIMULTANÉES requises
+        # Nombreuses petites pustules + couleur orange-brun + densité + bords couverts
         pct_brun_clair_r = float(features.get("percent_brun_clair", 0))
         pct_brun_fonce_r = float(features.get("percent_brun_fonce", 0))
         rust_color_signal = pct_brun_clair_r + pct_brun_fonce_r
-        if spot_count >= 8 and spot_density >= 10.0 and float(features.get("spot_edge_percent", 0)) >= 20.0:
-                return "rust"
-        # Rouille par couleur orange-brun dominant + micro-taches (pustules typiques)
-        if rust_color_signal >= 15.0 and spot_count >= 5 and spot_density >= 6.0:
-                return "rust"
-        # Rouille : fort brun sans taches nettes (stade avancé)
-        if pct_brun_clair_r >= 20.0 and pct_brown >= 12.0 and texture_roughness >= 10.0:
+        rust_circularity = float(features.get("spot_mean_circularity", 0))
+        rust_edge_pct = float(features.get("spot_edge_percent", 0))
+        # Toutes les conditions doivent être réunies (ET logique strict)
+        rust_multi_cond = (
+                spot_count >= 10              # nombreuses pustules
+                and spot_density >= 12.0      # densité significative
+                and rust_color_signal >= 12.0 # couleur brun/orange présente
+                and rust_edge_pct >= 25.0     # distribution sur toute la surface
+                and spot_count >= 8           # confirmation taches multiples
+        )
+        if rust_multi_cond:
                 return "rust"
 
         # Flétrissement : jaunissement + sécheresse, peu de taches
@@ -859,26 +863,65 @@ def _score_for_disease(features: Dict, disease: Dict) -> Tuple[float, Dict[str, 
                 },
         }
 
-        # --- Bonus visuel spécifique rouille ---
-        # La rouille du maïs a une signature couleur orange/brun très distinctive.
-        # Si la maladie DB est rouille ET que l'image montre ces couleurs + micro-taches
-        # → on booste le score pour compenser les critères généraux moins discriminants.
+        # --- Score de confiance rouille (rust_confidence_score) ---
+        # La rouille ne peut bénéficier d'un bonus que si TOUTES les conditions
+        # suivantes sont réunies simultanément. Une seule condition ne suffit pas.
+        rust_confidence_score = 0.0
         rust_visual_bonus = 0.0
         if pattern == "rust":
-                pct_bc = float(features.get("percent_brun_clair", 0))
-                pct_bf = float(features.get("percent_brun_fonce", 0))
-                s_count = float(features.get("spot_count", 0))
-                s_dens  = float(features.get("spot_density", 0))
-                rust_color_present = (pct_bc + pct_bf) >= 10.0
-                rust_spots_present = s_count >= 5 and s_dens >= 6.0
-                if rust_color_present and rust_spots_present:
-                        rust_visual_bonus = min(0.12, (pct_bc + pct_bf) * 0.004 + s_dens * 0.002)
+                pct_bc   = float(features.get("percent_brun_clair", 0))
+                pct_bf   = float(features.get("percent_brun_fonce", 0))
+                s_count  = float(features.get("spot_count", 0))
+                s_dens   = float(features.get("spot_density", 0))
+                s_circ   = float(features.get("spot_mean_circularity", 0))
+                s_area   = float(features.get("spot_mean_area", 9999))
+                tex_r    = float(features.get("texture_roughness", 0))
+                edge_pct = float(features.get("spot_edge_percent", 0))
+
+                # Composantes du score de confiance (0-1 chacune)
+                rust_color_score   = min(1.0, (pct_bc + pct_bf) / 30.0)        # couleur brun/orange
+                rust_density_score = min(1.0, s_dens / 20.0)                   # densité pustules
+                rust_texture_score = min(1.0, tex_r / 25.0)                    # texture poudreuse
+                # Taille micro-pustules : score max si petites (30-400px), décroit sinon
+                if s_area < 30:
+                        rust_size_score = 0.3
+                elif s_area <= 400:
+                        rust_size_score = 1.0 - (s_area - 30) / 600.0
+                else:
+                        rust_size_score = max(0.0, 1.0 - (s_area - 400) / 1000.0)
+                # Dispersion (nombreuses taches + couvrant la surface)
+                rust_dispersion_score = min(1.0, s_count / 15.0) * min(1.0, edge_pct / 40.0)
+                # Cohérence couleur (score existant comparé au profil DB)
+                rust_coherence_score  = color_score
+
+                # rust_confidence_score = moyenne pondérée des 6 composantes
+                rust_confidence_score = (
+                        rust_color_score     * 0.25
+                        + rust_density_score * 0.25
+                        + rust_texture_score * 0.15
+                        + rust_size_score    * 0.15
+                        + rust_dispersion_score * 0.10
+                        + rust_coherence_score  * 0.10
+                )
+
+                # Debug logs (demandés)
+                print(f"Rust confidence:  {rust_confidence_score:.3f}")
+                print(f"Rust texture:     {rust_texture_score:.3f}")
+                print(f"Rust color:       {rust_color_score:.3f}")
+                print(f"Rust density:     {rust_density_score:.3f}")
+                print(f"Final rust score: {rust_confidence_score:.3f}")
+
+                # Bonus UNIQUEMENT si confiance forte ET toutes les conditions présentes
+                # Seuil : rust_confidence_score > 0.55 (pas de bonus si score moyen)
+                RUST_CONFIDENCE_THRESHOLD = 0.55
+                if rust_confidence_score > RUST_CONFIDENCE_THRESHOLD:
+                        # Bonus proportionnel à la confiance (max +0.08)
+                        rust_visual_bonus = min(0.08, (rust_confidence_score - RUST_CONFIDENCE_THRESHOLD) * 0.36)
                         reasons.append(
-                                f"bonus visuel rouille : brun={pct_bc+pct_bf:.1f}%, "
-                                f"taches={s_count:.0f} (densité={s_dens:.1f}%)"
+                                f"confiance rouille: {rust_confidence_score:.0%} "
+                                f"(couleur={rust_color_score:.0%}, densité={rust_density_score:.0%})"
                         )
-                elif rust_color_present:
-                        rust_visual_bonus = min(0.06, (pct_bc + pct_bf) * 0.002)
+                # Sinon : aucun bonus (le score brut doit suffire)
 
         # --- Score pondéré ---
         weighted = (
@@ -1034,7 +1077,35 @@ def find_best_match(
                 score, detail = _score_for_disease(features, disease)
                 scored.append((disease, score, detail))
 
+        # ── Normalisation : empêche une maladie d'écraser toutes les autres ──
+        # On applique une normalisation douce (softmax atténué) :
+        # si l'écart TOP1-TOP2 est > 30 pts et TOP1 > 0.85, on ramène TOP1 à max 0.85
+        # pour garantir que les autres maladies restent comparables.
+        if scored:
+                raw_scores = [s for _, s, _ in scored]
+                max_raw = max(raw_scores)
+                # Normalisation linéaire : on remet les scores dans [0, 1] relativement
+                # mais on les plafonne à 0.95 pour éviter la domination écrasante
+                if max_raw > 0.0:
+                        scored_norm: List[Tuple[Dict, float, Dict]] = []
+                        for disease_i, score_i, detail_i in scored:
+                                # Si le score est très dominant, on l'atténue légèrement
+                                if score_i >= 0.90 and max_raw >= 0.90:
+                                        score_adj = 0.88 + (score_i - 0.90) * 0.4   # atténuation douce
+                                else:
+                                        score_adj = score_i
+                                scored_norm.append((disease_i, _clamp01(score_adj), detail_i))
+                        scored = scored_norm
+
         scored.sort(key=lambda item: item[1], reverse=True)
+
+        # Debug log : tous les scores pour comparer
+        disease_scores = {
+                d.get("disease_name", "?"): round(s * 100, 1)
+                for d, s, _ in scored
+        }
+        print(f"Other disease scores: {disease_scores}")
+
         _log_scoring_details(scored, image_pattern)
 
         if not scored:

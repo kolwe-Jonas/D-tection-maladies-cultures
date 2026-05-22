@@ -1131,29 +1131,30 @@ def _compute_disease_pattern_score(
         ).astype(np.uint8)
         symptoms["chlorose"] = 100.0 * float(np.count_nonzero(chlorosis)) / total_pixels
 
-        # 2. Rouille — détection avancée orange-brun typique des pustules
-        #    Plage principale : orange chaud (hue 3-20, sat élevée)
+        # 2. Rouille — couleur orange-brun stricte (HAUTE saturation requise)
+        #    Plage principale : orange chaud (hue 5-18, sat ÉLEVÉE — pustules typiques)
         rust_core = (
-                (hue >= 3) & (hue <= 20) & (sat > 70) & (val > 55) & (val < 210)
+                (hue >= 5) & (hue <= 18) & (sat > 100) & (val > 60) & (val < 200)
         ).astype(np.uint8)
-        #    Plage étendue brun-rouille : inclut les pustules plus sombres
+        #    Plage étendue brun-rouille : plus sombre mais TOUJOURS saturé
         rust_ext = (
-                (hue >= 0) & (hue <= 28) & (sat > 50) & (val > 40) & (val < 160)
+                (hue >= 3) & (hue <= 22) & (sat > 80) & (val > 45) & (val < 155)
         ).astype(np.uint8)
         rust_combined = np.clip(rust_core.astype(np.uint16) + rust_ext.astype(np.uint16), 0, 1).astype(np.uint8)
         pct_rust_color = 100.0 * float(np.count_nonzero(rust_combined)) / total_pixels
         symptoms["rouille"] = pct_rust_color
 
-        # 2b. Rouille — micro-pustules dispersées (petites composantes rondes orange/brun)
-        rust_mask_bin = (rust_combined * 255).astype(np.uint8)
-        k_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        rust_mask_clean = cv2.morphologyEx(rust_mask_bin, cv2.MORPH_OPEN, k_dilate)
+        # 2b. Rouille — micro-pustules dispersées (composantes de taille pustule : 8-800px)
+        #     Utilise seulement rust_core (couleur orange stricte) pour éviter les faux positifs
+        rust_mask_strict = (rust_core * 255).astype(np.uint8)
+        k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        rust_mask_clean = cv2.morphologyEx(rust_mask_strict, cv2.MORPH_OPEN, k_open)
         n_rust, _, stats_rust, _ = cv2.connectedComponentsWithStats(rust_mask_clean, connectivity=8)
         rust_pustules = sum(
                 1 for i in range(1, n_rust)
-                if 4 < stats_rust[i, cv2.CC_STAT_AREA] < 2000
+                if 8 < stats_rust[i, cv2.CC_STAT_AREA] < 800
         )
-        symptoms["rouille_pustules"] = min(100.0, rust_pustules * 5.0)
+        symptoms["rouille_pustules"] = min(100.0, rust_pustules * 4.0)
 
         # 3. Nécrose / brûlures — brun foncé à noir avec composante biologique
         necrosis = (
@@ -1229,35 +1230,44 @@ def _compute_disease_pattern_score(
         symptoms["jaunissement"] = 100.0 * float(np.count_nonzero(yellow_diffuse)) / total_pixels
 
         # 13. Lésions irrégulières — composite brun+sombre+jaune (spectre maladie large)
+        #     N'inclut PAS rust_core pour éviter le biais rouille
         irregular_lesion = np.clip(
-                (rust_core.astype(np.uint16)
-                 + (((hue >= 0) & (hue <= 30) & (sat > 30) & (val < 130)).astype(np.uint16))
-                 + (((hue >= 14) & (hue <= 50) & (sat > 25) & (val > 60) & (val < 160)).astype(np.uint16))),
+                (((hue >= 0) & (hue <= 30) & (sat > 30) & (val < 130)).astype(np.uint16))
+                + (((hue >= 14) & (hue <= 50) & (sat > 25) & (val > 60) & (val < 160)).astype(np.uint16)),
                 0, 1
         ).astype(np.uint8)
         symptoms["lesions"] = 100.0 * float(np.count_nonzero(irregular_lesion)) / total_pixels
 
-        # ── Score de rouille spécifique (bonus fort si pustules ET couleur) ──
+        # ── Score de rouille STRICT — requiert couleur ET pustules ET dispersion ──
+        # Toutes les conditions doivent être réunies simultanément.
+        # Une seule condition (brun ou quelques taches) ne suffit plus.
         rust_score_bonus = 0.0
-        if pct_rust_color > 2.0 and rust_pustules >= 5:
-                rust_score_bonus = min(18.0, pct_rust_color * 1.5 + rust_pustules * 0.8)
-        elif pct_rust_color > 4.0:
-                rust_score_bonus = min(12.0, pct_rust_color * 1.2)
+        rust_has_color    = pct_rust_color >= 8.0          # couleur orange-brun significative
+        rust_has_pustules = rust_pustules  >= 12            # nombreuses micro-pustules
+        rust_has_dispersion = rust_pustules >= 6 and pct_rust_color >= 5.0
+        if rust_has_color and rust_has_pustules:
+                # Bonus maximum uniquement si les deux conditions fortes sont réunies
+                rust_score_bonus = min(10.0, pct_rust_color * 0.7 + rust_pustules * 0.3)
+        elif rust_has_dispersion:
+                # Bonus modeste si signaux intermédiaires
+                rust_score_bonus = min(5.0, pct_rust_color * 0.4 + rust_pustules * 0.2)
+        # Sinon : bonus = 0 (brun seul ou quelques taches seules ne comptent pas)
 
         # === Score global — pondération par signification agricole ===
+        # Seuils relevés pour éviter les faux positifs (signaux trop faibles ignorés)
         sig_count = 0
-        if symptoms["chlorose"]        >  5.0: sig_count += 1
-        if symptoms["rouille"]         >  2.0: sig_count += 1
-        if symptoms["rouille_pustules"]>  5.0: sig_count += 1   # pustules = signal fort
-        if symptoms["necrose"]         >  3.5: sig_count += 1
-        if symptoms["sec"]             >  7.0: sig_count += 1
-        if symptoms["mildiou"]         >  3.5: sig_count += 1
-        if symptoms["mosaique"]        >  8.0: sig_count += 1
-        if symptoms["nervures"]        >  1.2: sig_count += 1
-        if symptoms["taches_bio"]      >  0.0: sig_count += 1
-        if symptoms["brulures"]        >  1.5: sig_count += 1
-        if symptoms["jaunissement"]    >  4.0: sig_count += 1
-        if symptoms["lesions"]         >  5.0: sig_count += 1
+        if symptoms["chlorose"]        >  8.0: sig_count += 1
+        if symptoms["rouille"]         >  8.0: sig_count += 1   # seuil haut : couleur orange stricte
+        if symptoms["rouille_pustules"]> 20.0: sig_count += 1   # seuil haut : ≥5 pustules réelles
+        if symptoms["necrose"]         >  5.0: sig_count += 1
+        if symptoms["sec"]             >  9.0: sig_count += 1
+        if symptoms["mildiou"]         >  5.0: sig_count += 1
+        if symptoms["mosaique"]        > 12.0: sig_count += 1
+        if symptoms["nervures"]        >  1.5: sig_count += 1
+        if symptoms["taches_bio"]      >  5.0: sig_count += 1   # seuil relevé
+        if symptoms["brulures"]        >  2.0: sig_count += 1
+        if symptoms["jaunissement"]    >  6.0: sig_count += 1
+        if symptoms["lesions"]         >  8.0: sig_count += 1
         if veg_percent                 > 10.0: sig_count += 1
 
         disease_pattern_score = min(100.0,

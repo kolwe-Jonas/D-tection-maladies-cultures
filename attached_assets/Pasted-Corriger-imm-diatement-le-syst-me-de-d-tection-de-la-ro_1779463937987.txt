@@ -1,0 +1,137 @@
+Corriger immédiatement le système de détection de la rouille du maïs.
+
+PROBLÈME CRITIQUE :
+Depuis les dernières modifications, presque toutes les analyses retournent :
+→ rouille du maïs
+
+Le système est devenu trop biaisé vers la rouille.
+
+OBJECTIF :
+Ramener la détection de la rouille à un comportement équilibré et réaliste.
+
+IMPORTANT :
+Ne pas casser :
+- les autres maladies
+- la validation des feuilles
+- le frontend
+- l’interface
+- le design
+
+Modifier uniquement :
+- backend/services/disease_detector.py
+- backend/services/image_analysis.py
+
+━━━━━━━━━━━━━━━━━━━
+1. RÉDUIRE LE POIDS DE LA ROUILLE
+━━━━━━━━━━━━━━━━━━━
+
+Le disease_pattern_score de la rouille est actuellement trop fort.
+
+Réduire :
+- les bonus automatiques orange/brun
+- les bonus de micro-taches simples
+- les bonus de texture poudreuse faibles
+
+IMPORTANT :
+Une simple présence de brun/orange ne doit plus suffire.
+
+━━━━━━━━━━━━━━━━━━━
+2. AJOUTER DES CONDITIONS STRICTES
+━━━━━━━━━━━━━━━━━━━
+
+La rouille du maïs doit être détectée seulement si plusieurs conditions sont réunies simultanément :
+
+- petites pustules nombreuses
+- distribution dispersée naturelle
+- couleur rouille spécifique
+- texture légèrement poudreuse
+- lésions séparées
+- forte cohérence agricole
+
+IMPORTANT :
+Si seulement une ou deux conditions sont présentes :
+→ ne pas conclure rouille.
+
+━━━━━━━━━━━━━━━━━━━
+3. AJOUTER UN SCORE DE CONFIANCE
+━━━━━━━━━━━━━━━━━━━
+
+Créer :
+
+rust_confidence_score
+
+Basé sur :
+- densité réelle des pustules
+- taille des lésions
+- dispersion typique
+- cohérence couleur
+- texture locale
+
+La rouille ne doit être sélectionnée que si :
+
+rust_confidence_score > threshold
+
+━━━━━━━━━━━━━━━━━━━
+4. ÉVITER LES FAUX POSITIFS
+━━━━━━━━━━━━━━━━━━━
+
+Ne pas confondre avec :
+- feuille sèche
+- ombre
+- zones sombres naturelles
+- bruit image
+- taches génériques
+- mauvaise luminosité
+- texture caméra
+
+━━━━━━━━━━━━━━━━━━━
+5. COMPARER AVEC LES AUTRES MALADIES
+━━━━━━━━━━━━━━━━━━━
+
+Avant de choisir la rouille :
+
+Comparer le score avec :
+- chlorose
+- brûlure
+- nécrose
+- feuille saine
+- stress hydrique
+- taches fongiques
+
+IMPORTANT :
+La rouille ne doit gagner que si son score est réellement dominant.
+
+━━━━━━━━━━━━━━━━━━━
+6. AJOUTER NORMALISATION DES SCORES
+━━━━━━━━━━━━━━━━━━━
+
+Normaliser tous les disease scores.
+
+Empêcher :
+- une maladie écrasante
+- domination artificielle de la rouille
+
+━━━━━━━━━━━━━━━━━━━
+7. AJOUTER DEBUG
+━━━━━━━━━━━━━━━━━━━
+
+Afficher :
+
+print("Rust confidence:", rust_confidence_score)
+print("Rust texture:", rust_texture_score)
+print("Rust color:", rust_color_score)
+print("Rust density:", rust_density_score)
+print("Final rust score:", rust_final_score)
+
+print("Other disease scores:", disease_scores)
+
+━━━━━━━━━━━━━━━━━━━
+8. RÉSULTAT ATTENDU
+━━━━━━━━━━━━━━━━━━━
+
+✅ la rouille ne domine plus toutes les analyses
+✅ les autres maladies réapparaissent
+✅ meilleure précision globale
+✅ moins de faux positifs
+✅ détection rouille plus réaliste
+✅ équilibre des maladies restauré
