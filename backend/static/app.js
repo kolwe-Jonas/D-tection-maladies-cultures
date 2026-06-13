@@ -320,3 +320,51 @@ if (analyzeBtn) {
     analyzeBtn.classList.remove('active');
 }
 console.log('✅ UI application events loaded');
+
+// ---- PWA: Service Worker registration and Install prompt handling ----
+let deferredInstallPrompt = null;
+const installBtn = document.getElementById('installBtn');
+
+window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredInstallPrompt = e;
+    if (installBtn) {
+        installBtn.classList.remove('hidden');
+    }
+});
+
+if (installBtn) {
+    installBtn.addEventListener('click', async () => {
+        if (!deferredInstallPrompt) return;
+        installBtn.disabled = true;
+        try {
+            deferredInstallPrompt.prompt();
+            const choice = await deferredInstallPrompt.userChoice;
+            if (choice.outcome === 'accepted') {
+                console.log('PWA install accepted');
+            } else {
+                console.log('PWA install dismissed');
+            }
+        } catch (err) {
+            console.warn('Install prompt failed:', err);
+        } finally {
+            installBtn.classList.add('hidden');
+            deferredInstallPrompt = null;
+            installBtn.disabled = false;
+        }
+    });
+}
+
+// Register service worker safely
+if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/static/service-worker.js')
+            .then((reg) => {
+                console.log('Service worker registered.', reg);
+            })
+            .catch((err) => {
+                console.warn('Service worker registration failed:', err);
+            });
+    });
+}
+
