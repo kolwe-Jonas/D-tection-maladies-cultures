@@ -1,12 +1,12 @@
 {
-  "name": "Detection Maladies Cultures v2",
-  "short_name": "AgriDetect v2",
+  "name": "AgriDetect",
+  "short_name": "AgriDetect",
   "start_url": "/",
-  "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#10b981",
-  "orientation": "portrait",
   "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ffffff",
+  "theme_color": "#2e7d32",
   "prefer_related_applications": false,
   "icons": [
     {

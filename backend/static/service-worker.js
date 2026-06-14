@@ -3,7 +3,7 @@ const PRECACHE_URLS = [
   '/',
   '/static/style.css',
   '/static/app.js',
-  '/static/manifest.json?v=3',
+  '/static/manifest.json',
   '/static/icons/icon-192.png',
   '/static/icons/icon-512.png'
 ];
