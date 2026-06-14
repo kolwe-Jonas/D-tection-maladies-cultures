@@ -355,30 +355,8 @@ if (installBtn) {
     });
 }
 
-// Register service worker safely
+// Service worker registration is performed in the template using Flask `url_for`.
 if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/static/service-worker.js', { scope: '/' })
-            .then((reg) => {
-                console.log('Service worker registered.', reg);
-                // If there's an active waiting service worker, prompt update handling
-                if (reg.waiting) {
-                    console.log('Service worker waiting to activate.');
-                }
-            })
-            .catch((err) => {
-                console.warn('Service worker registration failed:', err);
-            });
-
-        // Reload page when the newly installed SW takes control to ensure icons/manifest update
-        navigator.serviceWorker.addEventListener('controllerchange', () => {
-            console.log('Service worker controller changed — reloading.');
-            try {
-                window.location.reload();
-            } catch (e) {
-                console.warn('Reload failed after controllerchange:', e);
-            }
-        });
-    });
+    // placeholder: registration handled in server-rendered template
 }
 
