@@ -1,11 +1,11 @@
-const CACHE_NAME = 'agri-detect-v2';
+const CACHE_NAME = 'agri-detect-v3';
 const PRECACHE_URLS = [
   '/',
   '/static/style.css',
   '/static/app.js',
-  '/static/manifest.json?v=2',
-  '/static/icons/icon-192-v2.png',
-  '/static/icons/icon-512-v2.png'
+  '/static/manifest.json?v=3',
+  '/static/icons/icon-192.png',
+  '/static/icons/icon-512.png'
 ];
 
 self.addEventListener('install', (event) => {
@@ -59,7 +59,7 @@ self.addEventListener('fetch', (event) => {
           return response;
         });
       }).catch(() => {
-        return caches.match('/static/icons/icon-192-v2.png');
+        return caches.match('/static/icons/icon-192.png');
       });
     })
   );
