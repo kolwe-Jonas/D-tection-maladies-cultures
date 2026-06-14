@@ -1,11 +1,11 @@
-const CACHE_NAME = 'detect-cultures-v1';
+const CACHE_NAME = 'agri-detect-v2';
 const PRECACHE_URLS = [
   '/',
   '/static/style.css',
   '/static/app.js',
-  '/static/manifest.json',
-  '/static/icons/icon-192.svg',
-  '/static/icons/icon-512.svg'
+  '/static/manifest.json?v=2',
+  '/static/icons/icon-192-v2.png',
+  '/static/icons/icon-512-v2.png'
 ];
 
 self.addEventListener('install', (event) => {
@@ -20,7 +20,10 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) => Promise.all(
       keys.map((key) => {
-        if (key !== CACHE_NAME) return caches.delete(key);
+        if (key !== CACHE_NAME) {
+          return caches.delete(key);
+        }
+        return Promise.resolve();
       })
     ))
   );
@@ -56,7 +59,7 @@ self.addEventListener('fetch', (event) => {
           return response;
         });
       }).catch(() => {
-        return caches.match('/static/icons/icon-192.svg');
+        return caches.match('/static/icons/icon-192-v2.png');
       });
     })
   );
